@@ -18,19 +18,53 @@ class MapView {
     }
 
     initMap() {
+        const cartoKey = 'cb1_53g1_1_fd641ece496f7c5c49a5afbe';
+
+        // 1. CARTO Voyager (Default with User API Key)
+        const cartoVoyager = L.tileLayer(
+            `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=${cartoKey}`,
+            {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                subdomains: 'abcd',
+                maxZoom: 19,
+            }
+        );
+
+        // 2. CARTO Dark Matter (with User API Key)
+        const cartoDark = L.tileLayer(
+            `https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png?key=${cartoKey}`,
+            {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                subdomains: 'abcd',
+                maxZoom: 19,
+            }
+        );
+
+        // 3. CARTO Positron (with User API Key)
+        const cartoPositron = L.tileLayer(
+            `https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=${cartoKey}`,
+            {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                subdomains: 'abcd',
+                maxZoom: 19,
+            }
+        );
+
         // Initialize Leaflet map centered at SFO
         this.map = L.map('map', {
             center: [37.5585, -122.2711],
             zoom: 11,
             zoomControl: true,
+            layers: [cartoVoyager],
         });
 
-        // CartoDB Dark Matter tile layer
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-            subdomains: 'abcd',
-            maxZoom: 19,
-        }).addTo(this.map);
+        // Add Layer Switcher Control
+        const baseLayers = {
+            "CARTO Voyager": cartoVoyager,
+            "CARTO Dark": cartoDark,
+            "CARTO Positron": cartoPositron,
+        };
+        L.control.layers(baseLayers, null, { position: 'bottomleft' }).addTo(this.map);
 
         this.gridMarkersLayer = L.layerGroup().addTo(this.map);
         this.flightLayer = L.layerGroup().addTo(this.map);
