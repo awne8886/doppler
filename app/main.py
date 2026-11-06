@@ -220,5 +220,6 @@ app.mount("/static", StaticFiles(directory="/workspace/gentle-curie/app/static")
 
 
 @app.get("/")
+@app.head("/")
 def serve_index():
     return FileResponse("/workspace/gentle-curie/app/static/index.html")
