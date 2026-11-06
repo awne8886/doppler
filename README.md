@@ -1,10 +1,13 @@
 # Doppler // Acoustic Aircraft Geolocator
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-06b6d4.svg)](https://awne8886.github.io/doppler/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.124+-green.svg)](https://fastapi.tiangolo.com/)
 
 **Doppler** is a full-stack acoustic surveillance and inverse physics application that geolocates audio recordings of passing airplanes by matching their acoustic Doppler frequency curves with real-time and historical ADS-B flight tracking data.
+
+🔗 **Live GitHub Pages Web App**: [https://awne8886.github.io/doppler/](https://awne8886.github.io/doppler/)
 
 ---
 
