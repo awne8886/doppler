@@ -807,3 +807,32 @@ select:focus, input:focus {
     color: var(--accent-cyan);
     letter-spacing: 0.05em;
 }
+
+/* ================= LEAFLET LAYER SWITCHER ================= */
+.leaflet-control-layers {
+    background: rgba(13, 18, 31, 0.92) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 6px !important;
+    color: var(--text-primary) !important;
+    font-family: var(--font-mono) !important;
+    font-size: 0.75rem !important;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5) !important;
+    backdrop-filter: blur(6px);
+}
+
+.leaflet-control-layers-expanded {
+    padding: 8px 12px !important;
+}
+
+.leaflet-control-layers-base label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    cursor: pointer;
+}
+
+.leaflet-control-layers-base label:hover {
+    color: var(--accent-cyan);
+}
+

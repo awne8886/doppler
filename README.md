@@ -84,7 +84,7 @@ The resulting probability density is rendered as an interactive Leaflet heatmap 
 - **Synthetic Flyover WAV Generator**: Synthesizes authentic flyover audio obeying Doppler shifts, engine harmonics, and $1/r$ acoustic attenuation.
 
 ### 3. Mapping, Heatmaps & Telemetry
-- **Leaflet.js Dark Mode Map**: Renders search sector boundary, aircraft flight trajectories, and candidate observer grid.
+- **CARTO Maps Integration**: Integrated CARTO basemaps with API key support, featuring CARTO Voyager, CARTO Dark Matter, and CARTO Positron tile layers with an interactive layer switcher.
 - **Dynamic Acoustic Heatmap**: Renders heat map distribution with click-to-inspect candidate points.
 - **Hottest Point Pinpoint**: Highlights microphone ground truth with pulsing marker and coordinates popup.
 - **Curve Comparison HUD**: Real-time canvas chart overlaying user-traced acoustic curve vs. modeled 3D theoretical Doppler curve.
