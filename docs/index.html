@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DOPPLER // Acoustic Aircraft Geolocator</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    
+    <!-- Main CSS (Relative for GitHub Pages) -->
+    <link rel="stylesheet" href="./css/styles.css">
+</head>
+<body>
+    <header class="app-header">
+        <div class="brand">
+            <div class="radar-icon">
+                <div class="radar-sweep"></div>
+                <div class="radar-blip"></div>
+            </div>
+            <div>
+                <h1>DOPPLER <span class="badge">ACOUSTIC GEOLOCATOR</span></h1>
+                <p class="subtitle">ADS-B Flight Tracking &amp; Spectrographic Doppler Inversion</p>
+            </div>
+        </div>
+
+        <div class="header-controls">
+            <div class="preset-selector-wrap">
+                <label for="scenarioPreset">Scenario Preset:</label>
+                <select id="scenarioPreset">
+                    <option value="">-- Select Curated Flyover --</option>
+                    <option value="sfo_ual421" selected>SFO - UAL421 (Boeing 737 @ Foster City)</option>
+                    <option value="lhr_baw282">LHR - BAW282 (Airbus A350 @ Richmond)</option>
+                    <option value="jfk_dal410">JFK - DAL410 (Airbus A321 @ Queens)</option>
+                </select>
+            </div>
+            <button id="loadPresetBtn" class="btn btn-secondary">Load Scenario</button>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <!-- Left Panel: Audio, Spectrogram & Tracing -->
+        <section class="panel panel-left">
+            <div class="panel-header">
+                <h2>1. Acoustic Analysis &amp; Doppler Tracing</h2>
+                <span class="step-indicator">STEP 1 &bull; SPECTROGRAM</span>
+            </div>
+
+            <!-- Upload & File Controls -->
+            <div class="audio-control-card">
+                <div class="drop-zone" id="dropZone">
+                    <input type="file" id="audioFileInput" accept="audio/*" class="file-input-hidden">
+                    <div class="drop-content">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <p><strong>Click or Drag &amp; Drop</strong> audio file (WAV, MP3)</p>
+                        <span class="small-text">or load a curated scenario above</span>
+                    </div>
+                </div>
+
+                <div class="playback-bar">
+                    <button id="playBtn" class="btn btn-icon" title="Play / Pause Audio">
+                        <span id="playIcon">&#9658;</span>
+                    </button>
+                    <button id="stopBtn" class="btn btn-icon" title="Stop Audio">&#9632;</button>
+                    <div class="audio-info">
+                        <span id="audioFileName">sfo_ual421.wav</span>
+                        <span id="audioTimeDisplay">00:00 / 00:00</span>
+                    </div>
+                    <audio id="audioElement" preload="auto"></audio>
+                </div>
+            </div>
+
+            <!-- Spectrogram Canvas Container -->
+            <div class="spectrogram-card">
+                <div class="spectrogram-toolbar">
+                    <div class="tool-group">
+                        <span class="tool-label">Trace Mode:</span>
+                        <button id="traceModeBtn" class="btn btn-toggle active" title="Click &amp; Drag on canvas to trace Doppler curve">Trace Curve</button>
+                        <button id="snapPeakBtn" class="btn btn-toggle active" title="Snap traced points to local spectral peak">Snap Peak</button>
+                        <button id="undoTraceBtn" class="btn btn-sm">Undo</button>
+                        <button id="clearTraceBtn" class="btn btn-sm btn-danger">Clear</button>
+                    </div>
+                    <div class="tool-group">
+                        <label for="colormapSelect">Palette:</label>
+                        <select id="colormapSelect">
+                            <option value="inferno">Inferno</option>
+                            <option value="magma">Magma</option>
+                            <option value="turbo" selected>Turbo</option>
+                            <option value="jet">Classic Jet</option>
+                        </select>
+                        <label for="maxFreqSelect">Max Freq:</label>
+                        <select id="maxFreqSelect">
+                            <option value="1500">1.5 kHz</option>
+                            <option value="2000" selected>2.0 kHz</option>
+                            <option value="3000">3.0 kHz</option>
+                            <option value="5000">5.0 kHz</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Canvas Wrapper with Time & Freq Rulers -->
+                <div class="canvas-ruler-wrapper">
+                    <div class="y-axis-ruler" id="yAxisRuler"></div>
+                    <div class="canvas-viewport" id="canvasViewport">
+                        <canvas id="spectrogramCanvas" width="900" height="380"></canvas>
+                        <canvas id="traceCanvas" width="900" height="380"></canvas>
+                        <div id="playheadLine" class="playhead-line"></div>
+                        <div id="crosshairHUD" class="crosshair-hud">t: 0.0s | f: 0 Hz</div>
+                    </div>
+                </div>
+                <div class="x-axis-ruler" id="xAxisRuler"></div>
+
+                <div class="trace-stats-row">
+                    <div class="stat-pill">
+                        <span class="stat-label">Traced Points:</span>
+                        <span id="tracePointCount" class="stat-val">0</span>
+                    </div>
+                    <div class="stat-pill">
+                        <span class="stat-label">Extracted f&#8320; (Fundamental):</span>
+                        <input type="number" id="f0Input" value="840.0" step="1.0" min="20" max="5000">
+                        <span class="stat-unit">Hz</span>
+                    </div>
+                    <div class="stat-pill">
+                        <span class="stat-label">&Delta;f Drop:</span>
+                        <span id="deltaFDisplay" class="stat-val">-- Hz</span>
+                    </div>
+                    <button id="autoDetectF0Btn" class="btn btn-sm btn-secondary" title="Auto-detect f0 from inflection point">Auto f&#8320;</button>
+                </div>
+            </div>
+
+            <!-- Search Area & Flight Parameters -->
+            <div class="params-card">
+                <h3>Search Sector &amp; ADS-B Parameters</h3>
+                <div class="params-grid">
+                    <div class="input-field">
+                        <label for="centerLat">Search Center Lat (&deg;):</label>
+                        <input type="number" id="centerLat" value="37.5585" step="0.0001">
+                    </div>
+                    <div class="input-field">
+                        <label for="centerLon">Search Center Lon (&deg;):</label>
+                        <input type="number" id="centerLon" value="-122.2711" step="0.0001">
+                    </div>
+                    <div class="input-field">
+                        <label for="searchRadius">Search Radius (km):</label>
+                        <div class="range-wrap">
+                            <input type="range" id="searchRadius" min="3" max="30" value="10" step="1">
+                            <span id="radiusDisplay">10 km</span>
+                        </div>
+                    </div>
+                    <div class="input-field">
+                        <label for="gridResInput">Grid Resolution:</label>
+                        <select id="gridResInput">
+                            <option value="21">21 &times; 21 (441 points)</option>
+                            <option value="25" selected>25 &times; 25 (625 points)</option>
+                            <option value="31">31 &times; 31 (961 points)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="action-row">
+                    <button id="searchFlightsBtn" class="btn btn-secondary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
+                            <circle cx="12" cy="10" r="3"></circle>
+                        </svg>
+                        Query ADS-B Flights
+                    </button>
+                    <button id="geolocateBtn" class="btn btn-primary pulse-btn">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="22" y1="12" x2="18" y2="12"></line>
+                            <line x1="6" y1="12" x2="2" y2="12"></line>
+                            <line x1="12" y1="6" x2="12" y2="12"></line>
+                            <line x1="12" y1="22" x2="12" y2="18"></line>
+                        </svg>
+                        Geolocate Observer Microphone
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right Panel: Map, Heatmap & Match Analysis -->
+        <section class="panel panel-right">
+            <div class="panel-header">
+                <h2>2. Spatial Geolocation &amp; Physics Modeling</h2>
+                <span class="step-indicator">STEP 2 &bull; LEAFLET HEATMAP</span>
+            </div>
+
+            <!-- Leaflet Map Container -->
+            <div class="map-card">
+                <div id="map" class="map-view"></div>
+                <div class="map-overlay-badge" id="mapOverlayBadge">
+                    <span class="status-dot"></span> Ready for analysis
+                </div>
+            </div>
+
+            <!-- Results & Telemetry Card -->
+            <div class="results-card" id="resultsCard">
+                <div class="results-header">
+                    <h3>Acoustic Geolocation Telemetry</h3>
+                    <div class="score-badge" id="matchScoreBadge">
+                        <span class="score-num" id="matchScoreNum">--</span>%
+                        <span class="score-lbl">MATCH CONFIDENCE</span>
+                    </div>
+                </div>
+
+                <div class="telemetry-grid">
+                    <div class="telem-item">
+                        <span class="telem-label">ESTIMATED MIC COORDS:</span>
+                        <div class="coords-display">
+                            <span id="resLatLon" class="telem-val">--</span>
+                            <button id="copyCoordsBtn" class="btn btn-xs" title="Copy Coordinates">&#128203;</button>
+                        </div>
+                    </div>
+                    <div class="telem-item">
+                        <span class="telem-label">MATCHED FLIGHT:</span>
+                        <span id="resFlightId" class="telem-val highlight">--</span>
+                    </div>
+                    <div class="telem-item">
+                        <span class="telem-label">AIRCRAFT TYPE:</span>
+                        <span id="resAircraftType" class="telem-val">--</span>
+                    </div>
+                    <div class="telem-item">
+                        <span class="telem-label">LEAST SQUARES RESIDUAL:</span>
+                        <span id="resRmse" class="telem-val">-- Hz RMSE</span>
+                    </div>
+                    <div class="telem-item">
+                        <span class="telem-label">TIME SHIFT OFFSET:</span>
+                        <span id="resTimeShift" class="telem-val">-- s</span>
+                    </div>
+                    <div class="telem-item">
+                        <span class="telem-label">GRID CANDIDATES:</span>
+                        <span id="resTotalTested" class="telem-val">-- evaluated</span>
+                    </div>
+                </div>
+
+                <!-- Comparison Curve Canvas -->
+                <div class="comparison-card">
+                    <h4>Doppler Frequency Fit: Traced (Acoustic) vs Modeled (ADS-B Physics)</h4>
+                    <div class="canvas-wrap">
+                        <canvas id="comparisonChart" width="550" height="180"></canvas>
+                    </div>
+                    <div class="legend-row">
+                        <span class="legend-item"><span class="legend-color trace-line"></span> Traced Acoustic Curve</span>
+                        <span class="legend-item"><span class="legend-color model-line"></span> Modeled ADS-B 3D Doppler Curve</span>
+                        <span class="legend-item"><span class="legend-color f0-line"></span> Fundamental f&#8320;</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Modal Spinner -->
+    <div id="loadingOverlay" class="loading-overlay hidden">
+        <div class="spinner-box">
+            <div class="sonar-emitter"></div>
+            <p id="loadingMessage">Evaluating 3D Doppler physics across candidate grid...</p>
+        </div>
+    </div>
+
+    <!-- Scripts (Relative paths for GitHub Pages) -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+    
+    <script src="./js/physics_engine.js"></script>
+    <script src="./js/adsb_manager.js"></script>
+    <script src="./js/api_client.js"></script>
+    <script src="./js/audio_analyzer.js"></script>
+    <script src="./js/tracer.js"></script>
+    <script src="./js/map_view.js"></script>
+    <script src="./js/app.js"></script>
+</body>
+</html>

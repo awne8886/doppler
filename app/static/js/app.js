@@ -55,7 +55,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         let centerLon = -122.2711;
         let radius = 10;
         let f0 = 840.0;
-        let audioUrl = `/static/samples/${scenarioId}.wav`;
+        let audioUrl = `./samples/${scenarioId}.wav`;
 
         if (scenario) {
             centerLat = scenario.search_center.lat;
