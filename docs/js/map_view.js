@@ -10,6 +10,7 @@ class MapView {
         this.flightLayer = null;
         this.radiusCircle = null;
         this.hottestMarker = null;
+        this.altLayer = null;
 
         this.comparisonCanvas = document.getElementById('comparisonChart');
         this.chartCtx = this.comparisonCanvas.getContext('2d');
@@ -68,6 +69,7 @@ class MapView {
 
         this.gridMarkersLayer = L.layerGroup().addTo(this.map);
         this.flightLayer = L.layerGroup().addTo(this.map);
+        this.altLayer = L.layerGroup().addTo(this.map);
 
         // Map click updates search center if user clicks holding Alt or Shift
         this.map.on('click', (e) => {
@@ -98,7 +100,9 @@ class MapView {
         }).addTo(this.map);
     }
 
-    displayHeatmap(heatmapPoints, bestLocation, flightInfo) {
+    displayHeatmap(heatmapPoints, bestLocation, flightInfo, extras = {}) {
+        this.altLayer.clearLayers();
+        heatmapPoints = (heatmapPoints || []).filter(p => p.rmse !== null && p.rmse !== undefined);
         // Clear previous layers
         if (this.heatLayer) {
             this.map.removeLayer(this.heatLayer);
@@ -151,15 +155,38 @@ class MapView {
                 <div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
                     <strong>Candidate Acoustic Observer</strong><br>
                     <strong>Coords:</strong> ${pt.lat.toFixed(5)}, ${pt.lon.toFixed(5)}<br>
-                    <strong>Match Score:</strong> <span style="color:#d97706; font-weight:bold;">${pt.score}%</span><br>
-                    <strong>Least Squares RMSE:</strong> ${pt.rmse} Hz<br>
+                    <strong>Fit Score:</strong> <span style="color:#d97706; font-weight:bold;">${pt.score}%</span><br>
+                    <strong>Robust RMSE:</strong> ${pt.rmse} Hz<br>
                     <strong>Matched Flight:</strong> ${flightInfo.callsign || flightInfo.flight_id}
                 </div>
             `);
             this.gridMarkersLayer.addLayer(circle);
         }
 
-        // 3. Mark Hottest Point (Estimated microphone location)
+        // 3. Competing optima and sensitivity radius
+        const decision = extras.decision;
+        for (const alt of extras.alternatives || []) {
+            const tie = decision && (decision.checks || []).some(c => c.check === 'ambiguity' &&
+                (c.near_tied_alternatives || []).some(t => Math.abs(t.lat - alt.lat) < 1e-5 && Math.abs(t.lon - alt.lon) < 1e-5));
+            L.circleMarker([alt.lat, alt.lon], {
+                radius: tie ? 9 : 6, color: tie ? '#f59e0b' : '#94a3b8', weight: 2, fillOpacity: 0, dashArray: tie ? null : '3,3',
+            }).bindPopup(`
+                <div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
+                    <strong>${tie ? 'Near-tied alternative' : 'Competing local optimum'}</strong><br>
+                    ${alt.lat.toFixed(5)}, ${alt.lon.toFixed(5)}<br>
+                    Robust RMSE: ${alt.robust_rmse_hz} Hz<br>
+                    ${(alt.distance_from_best_m / 1000).toFixed(2)} km from best
+                </div>`).addTo(this.altLayer);
+        }
+        if (bestLocation && bestLocation.uncertainty_radius_m) {
+            L.circle([bestLocation.lat, bestLocation.lon], {
+                radius: Math.max(10, bestLocation.uncertainty_radius_m),
+                color: decision && decision.status === 'supported' ? '#10b981' : '#f59e0b',
+                weight: 1.5, dashArray: '4,4', fillOpacity: 0.08,
+            }).bindTooltip(`Sensitivity radius ${Math.round(bestLocation.uncertainty_radius_m)} m (engineering envelope, uncalibrated)`).addTo(this.altLayer);
+        }
+
+        // 4. Mark Hottest Point (Estimated microphone location)
         if (bestLocation) {
             if (this.hottestMarker) {
                 this.map.removeLayer(this.hottestMarker);
@@ -194,10 +221,10 @@ class MapView {
                 .addTo(this.map)
                 .bindPopup(`
                     <div style="font-family:'Space Grotesk', sans-serif; font-size:13px; color:#111;">
-                        <h4 style="color:#e11d48; margin-bottom:4px;">&#127908; ESTIMATED MICROPHONE LOCATION</h4>
+                        <h4 style="color:#e11d48; margin-bottom:4px;">&#127908; ${decision && decision.status === 'supported' ? 'SUPPORTED MICROPHONE LOCATION' : 'BEST-RANKED HYPOTHESIS (INCONCLUSIVE)'}</h4>
                         <strong>Coords:</strong> ${bestLocation.lat.toFixed(6)}, ${bestLocation.lon.toFixed(6)}<br>
-                        <strong>Confidence Match:</strong> ${bestLocation.score}%<br>
-                        <strong>Residual RMSE:</strong> ${bestLocation.rmse_hz} Hz<br>
+                        <strong>Fit Score:</strong> ${bestLocation.score}%<br>
+                        <strong>Worst Event RMSE:</strong> ${bestLocation.rmse_hz} Hz<br>
                         <strong>Matched Flight:</strong> ${flightInfo.callsign || flightInfo.flight_id} (${flightInfo.aircraft_type})
                     </div>
                 `)
@@ -205,8 +232,14 @@ class MapView {
         }
     }
 
-    displayFlightTrajectory(trajectory) {
+    displayFlightTrajectories(trajectories) {
         this.flightLayer.clearLayers();
+        const colors = ['#f59e0b', '#a3e635', '#f472b6', '#c084fc', '#60a5fa'];
+        (trajectories || []).forEach((t, i) => this.displayFlightTrajectory(t, colors[i % colors.length], false));
+    }
+
+    displayFlightTrajectory(trajectory, color = '#f59e0b', clear = true) {
+        if (clear) this.flightLayer.clearLayers();
         if (!trajectory || !trajectory.latitudes || trajectory.latitudes.length === 0) return;
 
         const pathPoints = [];
@@ -216,7 +249,7 @@ class MapView {
 
         // Draw flight path polyline
         const polyline = L.polyline(pathPoints, {
-            color: '#f59e0b',
+            color: color,
             weight: 3,
             opacity: 0.85,
             dashArray: '8, 6',
@@ -233,12 +266,12 @@ class MapView {
                 <div style="
                     width: 28px; height: 28px;
                     background: #1e293b;
-                    border: 2px solid #f59e0b;
+                    border: 2px solid ${color};
                     border-radius: 50%;
                     display: flex; align-items: center; justify-content: center;
                     box-shadow: 0 0 10px rgba(245, 158, 11, 0.6);
                 ">
-                    <span style="color:#f59e0b; font-size:16px;">&#9992;</span>
+                    <span style="color:${color}; font-size:16px;">&#9992;</span>
                 </div>
             `,
             iconSize: [28, 28],
@@ -261,31 +294,36 @@ class MapView {
         const ctx = this.chartCtx;
         const width = canvas.width;
         const height = canvas.height;
-
         ctx.clearRect(0, 0, width, height);
-
         if (!comparisonPoints || comparisonPoints.length === 0) return;
 
-        // Margins
         const padL = 50, padR = 20, padT = 20, padB = 30;
         const plotW = width - padL - padR;
         const plotH = height - padT - padB;
 
+        // Group by event so separate flyovers are drawn as separate curves.
+        const byEvent = new Map();
+        for (const p of comparisonPoints) {
+            const k = p.event_id || 'E1';
+            if (!byEvent.has(k)) byEvent.set(k, []);
+            byEvent.get(k).push(p);
+        }
+        for (const arr of byEvent.values()) arr.sort((a, b) => a.time - b.time);
+
+        const freqs = [];
+        for (const p of comparisonPoints) {
+            if (p.traced_freq > 0) freqs.push(p.traced_freq);
+            if (p.modeled_freq > 0) freqs.push(p.modeled_freq);
+        }
+        const fMinRaw = Math.min(...freqs), fMaxRaw = Math.max(...freqs);
+        const padF = Math.max(20, 0.05 * (fMaxRaw - fMinRaw));
+        const minF = fMinRaw - padF, maxF = fMaxRaw + padF;
         const times = comparisonPoints.map(p => p.time);
-        const tracedFreqs = comparisonPoints.map(p => p.traced_freq);
-        const modeledFreqs = comparisonPoints.map(p => p.modeled_freq);
-
-        const allFreqs = [...tracedFreqs, ...modeledFreqs, f0].filter(f => f > 0);
-        const minF = Math.min(...allFreqs) - 50;
-        const maxF = Math.max(...allFreqs) + 50;
-        const minT = Math.min(...times);
-        const maxT = Math.max(...times);
+        const minT = Math.min(...times), maxT = Math.max(...times);
         const dt = Math.max(1.0, maxT - minT);
-
         const tToX = (t) => padL + ((t - minT) / dt) * plotW;
         const fToY = (f) => padT + (1.0 - (f - minF) / (maxF - minF)) * plotH;
 
-        // Draw axes and grid lines
         ctx.strokeStyle = '#1e293b';
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -294,14 +332,12 @@ class MapView {
             const y = fToY(fVal);
             ctx.moveTo(padL, y);
             ctx.lineTo(width - padR, y);
-
             ctx.fillStyle = '#64748b';
             ctx.font = '10px "JetBrains Mono", monospace';
-            ctx.fillText(`${Math.round(fVal)}Hz`, 8, y + 3);
+            ctx.fillText(`${Math.round(fVal)}Hz`, 4, y + 3);
         }
         ctx.stroke();
 
-        // Draw f0 line
         if (f0 >= minF && f0 <= maxF) {
             const yF0 = fToY(f0);
             ctx.strokeStyle = 'rgba(148, 163, 184, 0.4)';
@@ -313,47 +349,41 @@ class MapView {
             ctx.setLineDash([]);
         }
 
-        // Draw Modeled Curve (Amber)
-        ctx.strokeStyle = '#f59e0b';
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        for (let i = 0; i < comparisonPoints.length; i++) {
-            const x = tToX(comparisonPoints[i].time);
-            const y = fToY(comparisonPoints[i].modeled_freq);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-
-        // Draw Traced Curve (Cyan with dots)
-        ctx.strokeStyle = '#22d3ee';
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        for (let i = 0; i < comparisonPoints.length; i++) {
-            const x = tToX(comparisonPoints[i].time);
-            const y = fToY(comparisonPoints[i].traced_freq);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-
-        // Draw points for traced curve
-        for (let i = 0; i < comparisonPoints.length; i++) {
-            const x = tToX(comparisonPoints[i].time);
-            const y = fToY(comparisonPoints[i].traced_freq);
-            ctx.fillStyle = '#22d3ee';
+        const drawLine = (pts, key, color, w) => {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = w;
             ctx.beginPath();
-            ctx.arc(x, y, 3, 0, Math.PI * 2);
-            ctx.fill();
+            let pen = false;
+            for (const p of pts) {
+                const v = p[key];
+                if (v === null || v === undefined || !(v > 0)) { pen = false; continue; }
+                const x = tToX(p.time), y = fToY(v);
+                if (!pen) { ctx.moveTo(x, y); pen = true; } else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        };
+        for (const [id, pts] of byEvent.entries()) {
+            drawLine(pts, 'modeled_freq', '#f59e0b', 2.5);
+            drawLine(pts, 'traced_freq', '#22d3ee', 1.5);
+            const stride = Math.max(1, Math.ceil(pts.length / 30));
+            ctx.fillStyle = '#22d3ee';
+            for (let i = 0; i < pts.length; i += stride) {
+                ctx.beginPath();
+                ctx.arc(tToX(pts[i].time), fToY(pts[i].traced_freq), 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            if (byEvent.size > 1) {
+                ctx.fillStyle = '#e2e8f0';
+                ctx.font = '10px "JetBrains Mono", monospace';
+                ctx.fillText(id, tToX(pts[0].time) + 3, fToY(pts[0].traced_freq) - 6);
+            }
         }
 
-        // Time axis ticks
         ctx.fillStyle = '#64748b';
         ctx.font = '10px "JetBrains Mono", monospace';
         for (let i = 0; i <= 4; i++) {
             const tVal = minT + (i / 4) * dt;
-            const x = tToX(tVal);
-            ctx.fillText(`${tVal.toFixed(1)}s`, x - 10, height - 8);
+            ctx.fillText(`${tVal.toFixed(1)}s`, tToX(tVal) - 10, height - 8);
         }
     }
 }
