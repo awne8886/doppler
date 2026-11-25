@@ -60,7 +60,7 @@ class Settings:
         return os.path.join(self.data_dir, "cache")
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         origins_raw = os.environ.get("DOPPLER_CORS_ORIGINS", "*")
         origins = [o.strip() for o in origins_raw.split(",") if o.strip()]
         return cls(

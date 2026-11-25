@@ -30,7 +30,7 @@ import shutil
 import struct
 import subprocess
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -118,7 +118,7 @@ def read_wav_start(path: str) -> Optional[Dict[str, Any]]:
             continue
         dt, field = local
         return {
-            "start_epoch": dt.replace(tzinfo=timezone.utc).timestamp(),
+            "start_epoch": dt.replace(tzinfo=UTC).timestamp(),
             "start_local_iso": dt.isoformat(timespec="milliseconds"),
             "source": source,
             "field": field,
@@ -148,7 +148,7 @@ def parse_ffprobe_json(info: Dict[str, Any], duration_s: Optional[float] = None)
         return None
     tz_known = dt.tzinfo is not None
     if not tz_known:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     epoch = dt.timestamp()
     if duration_s is None:
         try:

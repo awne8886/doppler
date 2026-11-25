@@ -6,6 +6,7 @@ and theoretical observed Doppler frequency curves.
 
 import math
 from typing import Tuple, Union
+
 import numpy as np
 
 
@@ -108,7 +109,7 @@ class DopplerEngine:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute slant distance and radial velocity of the aircraft relative to observer.
-        
+
         :param plane_pos: (N, 3) Cartesian positions of plane [x, y, z] in meters
         :param plane_vel: (N, 3) Cartesian velocity vectors of plane [vx, vy, vz] in m/s
         :param obs_pos: (3,) Cartesian position of candidate observer [x, y, z] in meters

@@ -204,3 +204,11 @@ def test_internal_errors_do_not_leak_details(monkeypatch):
     resp = client.post("/api/flights/search", json=SFO)
     assert resp.status_code == 500
     assert "secret" not in resp.text
+
+
+def test_frontend_config_key_is_configurable(monkeypatch):
+    static = client.get("/js/config.js")
+    assert static.status_code == 200 and "DOPPLER_CONFIG" in static.text
+    monkeypatch.setattr(main.settings, "carto_key", "deploy-key</script>")
+    body = client.get("/js/config.js").text
+    assert '"deploy-key</script>"' in body  # JSON-encoded, not raw interpolation

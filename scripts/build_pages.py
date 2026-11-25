@@ -64,7 +64,7 @@ def main(argv=None) -> int:
         shutil.copy2(os.path.join(SRC, p), os.path.join(DST, p))
     for p in stale:
         os.remove(os.path.join(DST, p))
-    for dirpath, dirnames, filenames in sorted(os.walk(DST), key=lambda w: -len(w[0])):
+    for dirpath, _dirnames, _filenames in sorted(os.walk(DST), key=lambda w: -len(w[0])):
         if dirpath != DST and not os.listdir(dirpath):
             os.rmdir(dirpath)
     print(f"synced docs/: {len(missing)} added, {len(changed)} updated, {len(stale)} removed")

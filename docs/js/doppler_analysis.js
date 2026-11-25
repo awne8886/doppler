@@ -89,6 +89,34 @@
         const f = (x - xs[lo]) / (xs[hi] - xs[lo] || 1e-12);
         return ys[lo] + f * (ys[hi] - ys[lo]);
     }
+    /** numpy.round semantics (round half to even). */
+    function roundHalfEven(x) {
+        const f = Math.floor(x), d = x - f;
+        if (d > 0.5) return f + 1;
+        if (d < 0.5) return f;
+        return f % 2 === 0 ? f : f + 1;
+    }
+    /** numpy.arange semantics: start + i * step for i < ceil((stop - start) / step). */
+    function arange(start, stop, step) {
+        const n = Math.max(0, Math.ceil((stop - start) / step));
+        const out = new Array(n);
+        for (let i = 0; i < n; i++) out[i] = start + i * step;
+        return out;
+    }
+    /** numpy.linspace semantics (endpoint included). */
+    function linspace(start, stop, num) {
+        if (num === 1) return [start];
+        const step = (stop - start) / (num - 1);
+        const out = new Array(num);
+        for (let i = 0; i < num; i++) out[i] = i * step + start;
+        out[num - 1] = stop;
+        return out;
+    }
+    function uniqueSorted(arr) {
+        const a = arr.slice().sort((x, y) => x - y);
+        return a.filter((v, i) => i === 0 || v !== a[i - 1]);
+    }
+
     function nelderMead(f, x0, steps, maxIter = 400, tol = 1e-8) {
         const n = x0.length;
         let simplex = [x0.slice()];
@@ -510,7 +538,7 @@
         irls_iterations: 2, coarse_halfwidth_s: 6.0, coarse_step_s: 0.25, fine_halfwidth_s: 0.4, fine_step_s: 0.02,
         refine_clock_halfwidth_s: 1.0, max_gap_s: 20.0, observer_alt_m: 0.0, altitude_bias_m: 0.0,
         max_alternatives: 6, grid_max_points: 40,
-        wind_e: 0.0, wind_n: 0.0, wind_uncertainty_mps: 5.0, elevation: null,
+        wind_e: 0.0, wind_n: 0.0, wind_uncertainty_mps: 5.0, elevation: null, refine_clock_step_s: 0.08,
     };
 
     /**
@@ -738,17 +766,18 @@
                 const [lo, hi] = this.clockWindow;
                 if (hi - lo < 1e-9) return [lo];
                 const n = Math.min(4000, Math.max(2, Math.ceil((hi - lo) / o.coarse_step_s) + 1));
-                return [...Array(n).keys()].map(i => lo + ((hi - lo) * i) / (n - 1));
+                return linspace(lo, hi, n);
             }
-            const set = new Set();
+            // Mirrors JointMatcher._candidate_starts exactly (numpy rounding and arange semantics).
+            const noms = [];
             for (const gid of this.groupIds) {
                 const ev = this.events[this.groups[gid][0]];
-                for (const k of this.allowed(gid)) {
-                    const nom = Math.round((curves[k].t_cpa - ev.cpa_time_s) / o.coarse_step_s) * o.coarse_step_s;
-                    for (let d = -o.coarse_halfwidth_s; d <= o.coarse_halfwidth_s + 1e-9; d += o.coarse_step_s) set.add(+(nom + d).toFixed(4));
-                }
+                for (const k of this.allowed(gid)) noms.push(roundHalfEven((curves[k].t_cpa - ev.cpa_time_s) / o.coarse_step_s) * o.coarse_step_s);
             }
-            return [...set].sort((a, b) => a - b);
+            const offs = arange(-o.coarse_halfwidth_s, o.coarse_halfwidth_s + 1e-9, o.coarse_step_s);
+            const all = [];
+            for (const nom of uniqueSorted(noms)) for (const d of offs) all.push(nom + d);
+            return uniqueSorted(all);
         }
 
         clipClock(starts) {
@@ -795,7 +824,7 @@
             const coarse = this.joint(curves, starts, o, events);
             if (!isFinite(coarse.total)) return coarse;
             const fine = [];
-            for (let d = -o.fine_halfwidth_s; d <= o.fine_halfwidth_s + 1e-9; d += o.fine_step_s) fine.push(coarse.start + d);
+            for (const d of arange(-o.fine_halfwidth_s, o.fine_halfwidth_s + 1e-9, o.fine_step_s)) fine.push(coarse.start + d);
             const f = this.joint(curves, this.clipClock(fine), o, events);
             return f.total <= coarse.total ? f : coarse;
         }
@@ -841,7 +870,7 @@
         refine(x0, y0, s0, o = null, models = null, events = null, maxIter = 120) {
             o = o || this.o;
             const hw = o.refine_clock_halfwidth_s, starts = [];
-            for (let d = -hw; d <= hw + 1e-9; d += o.fine_step_s * 2) starts.push(s0 + d);
+            for (const v of arange(s0 - hw, s0 + hw + 1e-9, o.refine_clock_step_s)) starts.push(v);
             const st = this.clipClock(starts);
             const step = this.grid ? this.grid.step : 400;
             const obj = (p) => {
@@ -883,7 +912,7 @@
             return out;
         }
 
-        async run(radiusKm, res = 21, { sensitivity = true, onProgress = null } = {}) {
+        async run(radiusKm, res = 25, { sensitivity = true, onProgress = null } = {}) {
             await this.gridSearch(radiusKm, res, p => onProgress && onProgress('grid', p));
             const mins = this.localMinima();
             if (!mins.length) return { status: 'no_match', message: 'No candidate position explained all events with full trajectory support.' };
@@ -996,7 +1025,7 @@
 
     function decimate(ev, n) {
         if (ev.t.length <= n) return ev;
-        const idx = [...new Set([...Array(n).keys()].map(i => Math.round((i * (ev.t.length - 1)) / (n - 1))))];
+        const idx = uniqueSorted(linspace(0, ev.t.length - 1, n).map(roundHalfEven));
         return Object.assign({}, ev, { t: idx.map(i => ev.t[i]), f: idx.map(i => ev.f[i]) });
     }
 
@@ -1176,8 +1205,9 @@
 
     // ------------------------------------------------------------- decision
     const DEFAULT_POLICY = {
-        name: 'engineering-v1', max_rmse_hz: 3.0, max_outlier_fraction: 0.25, min_support_fraction: 0.95,
+        name: 'engineering-v2', max_rmse_hz: 3.0, max_outlier_fraction: 0.25, min_support_fraction: 0.95,
         min_independent_flyovers: 2, near_tie_hz: 0.5, precision_target_m: 1000, require_sensitivity: false,
+        residual_metric: 'robust',
     };
     const REASONS = {
         no_doppler_events: 'No usable Doppler event was supplied.',
@@ -1216,10 +1246,11 @@
         const minSupport = Math.min(...matched.map(d => d.support_fraction));
         add('track_support', minSupport >= p.min_support_fraction, { min_support_fraction: minSupport });
         if (minSupport < p.min_support_fraction) first = first || 'insufficient_track_support';
-        const worstRmse = Math.max(...matched.map(d => d.rmse_hz));
+        const metricKey = p.residual_metric === 'robust' ? 'robust_rmse_hz' : 'rmse_hz';
+        const worstRmse = Math.max(...matched.map(d => (d[metricKey] != null ? d[metricKey] : d.rmse_hz)));
         const worstOut = Math.max(...matched.map(d => d.outlier_fraction));
         const residOk = worstRmse <= p.max_rmse_hz && worstOut <= p.max_outlier_fraction;
-        add('residuals', residOk, { worst_rmse_hz: worstRmse, worst_outlier_fraction: worstOut });
+        add('residuals', residOk, { worst_rmse_hz: worstRmse, worst_outlier_fraction: worstOut, metric: p.residual_metric });
         if (!residOk) first = first || 'inconsistent_event_match';
         const driftBound = matched.filter(d => d.drift_at_bound).map(d => d.event_id);
         add('source_drift', !driftBound.length, { events_at_bound: driftBound });
@@ -1327,11 +1358,12 @@
                 evaluated_flights: summaries([]), mode: 'client_physics', ...provenance };
         }
         const matcher = new DA.JointMatcher(candidates, events, payload.center_lat, payload.center_lon, opts, clock);
-        const res = await matcher.run(payload.radius_km, payload.grid_resolution || 21, {
+        const res = await matcher.run(payload.radius_km, payload.grid_resolution || 25, {
             sensitivity: payload.sensitivity !== false, onProgress,
         });
         const decision = DA.decideLocation(res, {
             max_rmse_hz: payload.max_rmse_hz || 3.0,
+            residual_metric: payload.residual_metric || 'robust',
             min_independent_flyovers: payload.min_independent_flyovers || 2,
             precision_target_m: payload.precision_target_m || 1000,
         }, events.length);
@@ -1397,7 +1429,7 @@
             })),
             f0_hz: primary.f0_hz,
             evaluated_flights: summaries(diags),
-            grid_resolution: payload.grid_resolution || 21,
+            grid_resolution: payload.grid_resolution || 25,
             speed_of_sound_mps: c,
             clock_mode: clock ? 'trusted_window' : 'free',
         };

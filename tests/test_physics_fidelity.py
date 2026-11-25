@@ -18,7 +18,7 @@ import app.main as main
 from app.adsb.sample_flights import get_curated_scenarios
 from app.audio.discovery import discover_file
 from app.audio.generator import emission_arrivals, simulate_events, synthesize_emission_phase_wav
-from app.physics.atmosphere import EXP, L, P0, T0, apply_qnh, qnh_altitude
+from app.physics.atmosphere import EXP, P0, T0, L, apply_qnh, qnh_altitude
 from app.physics.confidence import decide_location
 from app.physics.doppler_engine import DopplerEngine
 from app.physics.elevation import LatLonElevation, OpenTopoDataProvider, dem_grid

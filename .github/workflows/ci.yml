@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }} (ruff, pytest incl. benchmark subset)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            constraints.txt
+      - name: Install ffmpeg (non-WAV decoding and metadata tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install dependencies (pinned)
+        run: pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
+      - name: Ruff
+        run: ruff check app tests scripts
+      - name: Pytest
+        run: pytest --ignore=tests/test_benchmark_subset.py
+      - name: Benchmark subset (false-support regression gate)
+        run: pytest tests/test_benchmark_subset.py
+
+  javascript:
+    name: JavaScript (syntax, Python/JS parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax check
+        run: for f in app/static/js/*.js; do node --check "$f"; done
+      - name: Parity tests (node:test, no dependencies)
+        run: node --test "tests/js/*.test.mjs"
+
+  pages:
+    name: docs/ in sync with app/static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/build_pages.py --check

@@ -4,13 +4,14 @@ Synthesizes WAV files with realistic Doppler-shifted engine tones, harmonics,
 inverse-square amplitude decay, and atmospheric sound propagation.
 """
 
-import wave
 import os
+import wave
 from typing import Any, Dict, List, Tuple
+
 import numpy as np
 
-from app.physics.doppler_engine import DopplerEngine
 from app.adsb.sample_flights import get_curated_scenarios
+from app.physics.doppler_engine import DopplerEngine
 
 
 def synthesize_flyover_wav(

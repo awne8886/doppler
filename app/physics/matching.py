@@ -588,7 +588,7 @@ class JointMatcher:
         fine_idx, fine_starts, coarse_k = [], [], []
         for b, total in enumerate(totals):
             if not np.any(np.isfinite(total)):
-                out[b] = (float("inf"), float(starts_list[b][0]), {g: -1 for g in self.group_ids})
+                out[b] = (float("inf"), float(starts_list[b][0]), dict.fromkeys(self.group_ids, -1))
                 continue
             k = int(np.argmin(total))
             coarse_k.append(k)
@@ -638,8 +638,8 @@ class JointMatcher:
         results = map_matcher(self, "eval_grid_batches", calls, workers, prog)
         for task, res in zip(tasks, results):
             for b, rb in zip(task, res):
-                for c, (l, s, _) in zip(b, rb):
-                    loss[c] = l
+                for c, (loss_c, s, _) in zip(b, rb):
+                    loss[c] = loss_c
                     start[c] = s
 
     def grid_search(self, radius_km: float, grid_resolution: int = 25, progress: Optional[Any] = None) -> Dict[str, Any]:
@@ -737,18 +737,17 @@ class JointMatcher:
         def obj(p):
             key = (round(p[0], 2), round(p[1], 2))
             if key not in cache:
-                l, s, ch = self.evaluate_point(self.observer(p[0], p[1], opts), starts, opts, models, events)
-                cache[key] = (l, s, ch)
-            l = cache[key][0]
-            return l if np.isfinite(l) else 1e12
+                cache[key] = self.evaluate_point(self.observer(p[0], p[1], opts), starts, opts, models, events)
+            val = cache[key][0]
+            return val if np.isfinite(val) else 1e12
 
         init = np.array([[x0, y0], [x0 + 0.5 * step, y0], [x0, y0 + 0.5 * step]])
         res = minimize(obj, np.array([x0, y0]), method="Nelder-Mead",
                        options={"initial_simplex": init, "xatol": 2.0, "fatol": 1e-4, "maxiter": 160})
         x, y = float(res.x[0]), float(res.x[1])
-        l, s, ch = self.evaluate_point(self.observer(x, y, opts), starts, opts, models, events)
+        loss, s, ch = self.evaluate_point(self.observer(x, y, opts), starts, opts, models, events)
         clock_edge = bool(self.clock_window is None and (abs(s - starts[0]) < 1e-6 or abs(s - starts[-1]) < 1e-6))
-        return {"x": x, "y": y, "loss": l, "start": s, "choice": ch, "clock_at_refine_edge": clock_edge,
+        return {"x": x, "y": y, "loss": loss, "start": s, "choice": ch, "clock_at_refine_edge": clock_edge,
                 "converged": bool(res.success)}
 
     def to_geo(self, x: float, y: float) -> Tuple[float, float]:

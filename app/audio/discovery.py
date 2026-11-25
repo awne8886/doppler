@@ -31,7 +31,7 @@ import math
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Tuple
 

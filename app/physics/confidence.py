@@ -24,13 +24,18 @@ Physical motivation for the main gates:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class DecisionPolicy:
-    name: str = "engineering-v1"
+    # engineering-v2 (2026-11): the residual gate uses the robust (pseudo-Huber equivalent) RMSE.
+    # On the seeded benchmark (scripts/benchmark.py, 2 x 200 runs: calibration seed 1, held-out
+    # validation seed 2) this raised the supported fraction from 10 % to 26 % with 0 false supports
+    # in both sets, the same as the plain-RMSE gate of engineering-v1.  Other thresholds did not
+    # bind in the sweep and are unchanged; min_independent_flyovers=1 produced false supports.
+    name: str = "engineering-v2"
     max_rmse_hz: float = 3.0
     max_outlier_fraction: float = 0.25
     min_support_fraction: float = 0.95
@@ -38,6 +43,7 @@ class DecisionPolicy:
     near_tie_hz: float = 0.5
     precision_target_m: float = 1000.0
     require_sensitivity: bool = False
+    residual_metric: str = "robust"  # "robust" (pseudo-Huber equivalent RMSE) or "rmse" (plain; engineering-v1)
 
 
 REASONS = {
@@ -92,10 +98,11 @@ def decide_location(result: Dict[str, Any], policy: Optional[DecisionPolicy] = N
     if min_support < p.min_support_fraction:
         first_failure = first_failure or "insufficient_track_support"
 
-    worst_rmse = max(d["rmse_hz"] for d in matched)
+    metric_key = "robust_rmse_hz" if p.residual_metric == "robust" else "rmse_hz"
+    worst_rmse = max(d.get(metric_key, d["rmse_hz"]) for d in matched)
     worst_out = max(d["outlier_fraction"] for d in matched)
     resid_ok = worst_rmse <= p.max_rmse_hz and worst_out <= p.max_outlier_fraction
-    add("residuals", resid_ok, worst_rmse_hz=worst_rmse, worst_outlier_fraction=worst_out)
+    add("residuals", resid_ok, worst_rmse_hz=worst_rmse, worst_outlier_fraction=worst_out, metric=p.residual_metric)
     if not resid_ok:
         first_failure = first_failure or "inconsistent_event_match"
 

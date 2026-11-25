@@ -16,6 +16,7 @@ import wave
 
 import numpy as np
 import pytest
+from conftest import FIXTURES
 from fastapi.testclient import TestClient
 
 import app.main as main
@@ -25,12 +26,10 @@ from app.adsb.providers import DiskCache, OpenSkyHistoricalProvider, OpenSkyToke
 from app.adsb.sample_flights import get_curated_scenarios
 from app.adsb.track_import import ImportOptions, TrackImportError, parse_tracks, validate_uploaded_trajectory
 from app.audio.metadata import parse_ffprobe_json, read_recording_start
+from app.physics.doppler_engine import DopplerEngine
 from app.physics.flyover_fit import fit_flyover
 from app.physics.matching import TrajectoryModel
-from app.physics.doppler_engine import DopplerEngine
 from app.physics.prefilter import prefilter_flights
-
-from conftest import FIXTURES
 
 TRACKS = os.path.join(FIXTURES, "tracks")
 client = TestClient(main.app)

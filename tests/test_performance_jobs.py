@@ -14,8 +14,7 @@ import app.main as main
 from app.adsb.sample_flights import get_curated_scenarios
 from app.audio.generator import simulate_events
 from app.jobs import JobStore
-from app.physics.matching import (JointMatcher, MatchOptions, _CurvePack, _EventPack, fit_event, fit_rows,
-                                  wind_vector)
+from app.physics.matching import JointMatcher, MatchOptions, _CurvePack, _EventPack, fit_event, fit_rows, wind_vector
 
 SC = get_curated_scenarios()["sfo_dual"]
 C = SC["search_center"]

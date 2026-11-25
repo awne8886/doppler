@@ -96,7 +96,7 @@ class OpenSkyTokenManager:
         self._expires = 0.0
 
     @classmethod
-    def from_env(cls, **kw) -> "OpenSkyTokenManager":
+    def from_env(cls, **kw) -> OpenSkyTokenManager:
         return cls(os.environ.get("OPENSKY_CLIENT_ID"), os.environ.get("OPENSKY_CLIENT_SECRET"), **kw)
 
     @property

@@ -37,7 +37,7 @@ import math
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 FT_TO_M = 0.3048
@@ -70,7 +70,7 @@ def _tz_from_option(tz: Optional[str]) -> Optional[timezone]:
         return None
     s = str(tz).strip().upper()
     if s in ("UTC", "Z", "GMT"):
-        return timezone.utc
+        return UTC
     m = re.fullmatch(r"(?:UTC)?([+-])(\d{1,2}):?(\d{2})?", s)
     if not m:
         raise TrackImportError(f"Unsupported timezone '{tz}'. Use 'UTC' or an offset such as '+02:00'.")
@@ -93,7 +93,7 @@ def parse_time(value: Any, tz: Optional[timezone]) -> float:
     try:
         dt = datetime.fromisoformat(iso)
     except ValueError:
-        raise TrackImportError(f"Unrecognised timestamp '{s}'. Use Unix seconds/milliseconds or ISO 8601.")
+        raise TrackImportError(f"Unrecognised timestamp '{s}'. Use Unix seconds/milliseconds or ISO 8601.") from None
     if dt.tzinfo is None:
         if tz is None:
             raise TrackImportError(
@@ -276,7 +276,7 @@ def detect_format(data: bytes, filename: str = "") -> str:
         try:
             obj = json.loads(data.decode("utf-8-sig"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            raise TrackImportError("File looks like JSON but could not be parsed.")
+            raise TrackImportError("File looks like JSON but could not be parsed.") from None
         if isinstance(obj, dict) and "trace" in obj:
             return "readsb"
         if isinstance(obj, dict) and obj.get("type") in ("FeatureCollection", "Feature"):
@@ -299,7 +299,7 @@ def parse_tracks(data: bytes, filename: str = "", fmt: Optional[str] = None,
         try:
             data = gzip.decompress(data)
         except OSError:
-            raise TrackImportError("Corrupt gzip file.")
+            raise TrackImportError("Corrupt gzip file.") from None
     if not data.strip():
         raise TrackImportError("Empty file.")
     fmt = (fmt or "").strip().lower() or detect_format(data, filename)
@@ -359,7 +359,7 @@ def _parse_csv(data: bytes, filename: str, opts: ImportOptions, tz, warnings) ->
     try:
         header = next(reader)
     except StopIteration:
-        raise TrackImportError("CSV file has no header row.")
+        raise TrackImportError("CSV file has no header row.") from None
     cols = _match_columns(header)
     missing = [k for k in ("time", "lat", "lon", "alt") if k not in cols]
     if missing:
@@ -437,7 +437,7 @@ def _parse_fr24(data: bytes, filename: str, opts: ImportOptions, tz, warnings) -
     for row in reader:
         r = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
         try:
-            t = parse_time(r.get("timestamp") or r.get("utc"), tz or timezone.utc)
+            t = parse_time(r.get("timestamp") or r.get("utc"), tz or UTC)
             lat_s, lon_s = (r.get("position") or "").split(",")
             lat, lon = float(lat_s), float(lon_s)
         except (ValueError, TrackImportError):
@@ -469,7 +469,7 @@ def _parse_kml(data: bytes, filename: str, opts: ImportOptions, tz, warnings) ->
     try:
         root = ET.fromstring(data)
     except ET.ParseError as e:
-        raise TrackImportError(f"Invalid KML: {e}")
+        raise TrackImportError(f"Invalid KML: {e}") from e
     alt_unit = opts.altitude_unit if opts.altitude_unit != "auto" else "m"
     builders: List[_TrackBuilder] = []
     doc_name = next((el.text for el in root.iter() if _local(el.tag) == "name" and el.text), None) or filename or "KML"
@@ -643,7 +643,7 @@ def validate_uploaded_trajectory(traj: Dict[str, Any], index: int = 0) -> Dict[s
     try:
         cols = [list(traj[k]) for k in keys]
     except (KeyError, TypeError):
-        raise TrackImportError(f"Trajectory {index + 1} needs timestamps, latitudes, longitudes and altitudes arrays.")
+        raise TrackImportError(f"Trajectory {index + 1} needs timestamps, latitudes, longitudes and altitudes arrays.") from None
     n = len(cols[0])
     if any(len(c) != n for c in cols):
         raise TrackImportError(f"Trajectory {index + 1}: arrays have different lengths.")

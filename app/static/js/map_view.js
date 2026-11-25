@@ -22,11 +22,13 @@ class MapView {
     }
 
     initMap() {
-        const cartoKey = 'cb1_53g1_1_fd641ece496f7c5c49a5afbe';
+        // Configurable key (js/config.js or the server's DOPPLER_CARTO_KEY); omitted when empty.
+        const cartoKey = (window.DOPPLER_CONFIG && window.DOPPLER_CONFIG.cartoKey) || '';
+        const keyParam = cartoKey ? `?key=${encodeURIComponent(cartoKey)}` : '';
 
         // 1. CARTO Voyager (Default with User API Key)
         const cartoVoyager = L.tileLayer(
-            `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=${cartoKey}`,
+            `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png${keyParam}`,
             {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
                 subdomains: 'abcd',
@@ -36,7 +38,7 @@ class MapView {
 
         // 2. CARTO Dark Matter (with User API Key)
         const cartoDark = L.tileLayer(
-            `https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png?key=${cartoKey}`,
+            `https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png${keyParam}`,
             {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
                 subdomains: 'abcd',
@@ -46,7 +48,7 @@ class MapView {
 
         // 3. CARTO Positron (with User API Key)
         const cartoPositron = L.tileLayer(
-            `https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=${cartoKey}`,
+            `https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png${keyParam}`,
             {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
                 subdomains: 'abcd',

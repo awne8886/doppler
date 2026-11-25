@@ -5,13 +5,14 @@ single-flyover recovery (ported from the removed legacy GridScorer test).
 
 import os
 import sys
+
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from app.adsb.sample_flights import generate_linear_flight_trajectory, trajectory_start_for_cpa
 from app.physics.doppler_engine import DopplerEngine
 from app.physics.matching import JointMatcher, MatchOptions
-from app.adsb.sample_flights import generate_linear_flight_trajectory, trajectory_start_for_cpa
 
 
 def test_doppler_equation_and_radial_velocity():

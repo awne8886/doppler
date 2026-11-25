@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -30,11 +30,11 @@ from app.audio.discovery import DiscoverySettings, discover_file
 from app.audio.metadata import read_recording_start
 from app.config import Settings
 from app.jobs import JobStore
+from app.physics.atmosphere import apply_qnh
 from app.physics.confidence import DecisionPolicy, decide_location
 from app.physics.doppler_engine import DopplerEngine
-from app.physics.flyover_fit import fit_flyover, kinematic_consistency
-from app.physics.atmosphere import apply_qnh
 from app.physics.elevation import LatLonElevation, build_dem_provider, dem_grid
+from app.physics.flyover_fit import fit_flyover, kinematic_consistency
 from app.physics.matching import JointMatcher, MatchOptions, robust_rmse, wind_vector
 from app.physics.prefilter import prefilter_flights
 
@@ -142,7 +142,8 @@ class GeolocateRequest(BaseModel):
     recording_start_epoch: Optional[float] = Field(None, description="Trusted UTC epoch of the first audio sample")
     clock_tolerance_s: float = Field(2.0, ge=0.0, le=3600.0, description="Half-width of the trusted clock window")
     temperature_c: Optional[float] = Field(None, ge=-60.0, le=60.0, description="Air temperature for the speed of sound")
-    relative_humidity_pct: Optional[float] = Field(None, ge=0.0, le=100.0, description="Relative humidity for the speed of sound (default 50 % when temperature is given)")
+    relative_humidity_pct: Optional[float] = Field(
+        None, ge=0.0, le=100.0, description="Relative humidity for the speed of sound (default 50 % when temperature is given)")
     observer_alt_m: float = Field(0.0, description="Microphone height in the trajectory altitude datum "
                                   "(above the ground when an elevation grid or DEM lookup is used)")
     wind_speed_mps: Optional[float] = Field(None, ge=0.0, le=60.0, description="Uniform horizontal wind speed")
@@ -156,6 +157,8 @@ class GeolocateRequest(BaseModel):
                                             "when tracks use GNSS (ellipsoidal) altitude")
     sensitivity: bool = Field(True, description="Run perturbation sensitivity analysis")
     max_rmse_hz: float = Field(3.0, gt=0.0, description="Decision threshold for per-event RMSE")
+    residual_metric: str = Field("robust", pattern="^(robust|rmse)$",
+                                 description="Residual gate: robust (pseudo-Huber equivalent) RMSE or plain RMSE")
     min_independent_flyovers: int = Field(2, ge=1, le=10)
     precision_target_m: float = Field(1000.0, gt=0.0)
     grid_strategy: Optional[str] = Field(
@@ -209,10 +212,10 @@ def _find_flights(center_lat, center_lon, radius_km, t0, t1, scenario_id, demo, 
                                            time_window_start=t0, time_window_end=t1,
                                            scenario_id=scenario_id or None, demo=demo, icao24_hints=icao24_hints)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception:
         logger.exception("Flight search failed")
-        raise HTTPException(status_code=500, detail="Internal error while retrieving flight data.")
+        raise HTTPException(status_code=500, detail="Internal error while retrieving flight data.") from None
 
 
 @app.post("/api/flights/search")
@@ -236,7 +239,7 @@ def flyover_fit(req: FlyoverFitRequest):
         return fit_flyover([p.time for p in req.traced_curve], [p.freq for p in req.traced_curve],
                            speed_of_sound=c, loss_scale_hz=req.loss_scale_hz)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.post("/api/audio/discover")
@@ -281,7 +284,7 @@ def discover_audio(
         try:
             return discover_file(path, settings)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -343,9 +346,9 @@ def import_flights(
             altitude_unit=altitude_unit, speed_unit=speed_unit, vertical_rate_unit=vertical_rate_unit,
             timezone=timezone, altitude_basis=altitude_basis or None))
     except TrackImportError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except (ValueError, UnicodeDecodeError):
-        raise HTTPException(status_code=400, detail="The file could not be parsed as a track file.")
+        raise HTTPException(status_code=400, detail="The file could not be parsed as a track file.") from None
     return {"count": len(res["flights"]), "format": res["format"], "flights": res["flights"],
             "warnings": res["warnings"], "data_source": "uploaded"}
 
@@ -459,7 +462,7 @@ def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
         try:
             flights = [validate_uploaded_trajectory(t, i) for i, t in enumerate(req.trajectories)]
         except TrackImportError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         found = {"data_source": "uploaded", "notes": [f"{len(flights)} uploaded track(s) supplied with the request."],
                  "limitations": []}
     else:
@@ -517,10 +520,10 @@ def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
         res = matcher.run(req.radius_km, grid_res, sensitivity=req.sensitivity,
                           precision_target_m=req.precision_target_m, progress=progress)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     policy = DecisionPolicy(max_rmse_hz=req.max_rmse_hz, min_independent_flyovers=req.min_independent_flyovers,
-                            precision_target_m=req.precision_target_m)
+                            precision_target_m=req.precision_target_m, residual_metric=req.residual_metric)
     decision = decide_location(res, policy, clock_known=clock_window is not None, n_events=len(raw_events))
 
     if res.get("status") != "ok":
@@ -546,7 +549,7 @@ def _elevation_model(req: GeolocateRequest):
                 return None, "dem_unavailable_flat_ground"
             return LatLonElevation(grid, req.center_lat, req.center_lon, req.elevation_datum_offset_m), "dem"
     except (KeyError, TypeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=f"Invalid elevation grid: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid elevation grid: {e}") from e
     return None, "flat_ground"
 
 
@@ -733,6 +736,17 @@ def get_uploaded_audio(name: str):
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Upload not found or expired.")
     return FileResponse(path)
+
+
+@app.get("/js/config.js", include_in_schema=False)
+def frontend_config():
+    """Frontend config; DOPPLER_CARTO_KEY (if set) overrides the key in the static js/config.js."""
+    if not settings.carto_key:
+        return FileResponse(os.path.join(STATIC_DIR, "js", "config.js"), media_type="application/javascript")
+    import json as _json
+
+    body = f"window.DOPPLER_CONFIG = Object.assign({{cartoKey: {_json.dumps(settings.carto_key)}}}, window.DOPPLER_CONFIG || {{}});\n"
+    return Response(content=body, media_type="application/javascript", headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
