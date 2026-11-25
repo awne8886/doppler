@@ -21,14 +21,19 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.adsb.conditioning import condition_trajectory
 from app.adsb.flight_manager import FlightManager
 from app.adsb.opensky_client import OpenSkyClient
+from app.adsb.providers import build_providers
+from app.adsb.track_import import ImportOptions, TrackImportError, parse_tracks, validate_uploaded_trajectory
 from app.audio.discovery import DiscoverySettings, discover_file
+from app.audio.metadata import read_recording_start
 from app.config import Settings
 from app.physics.confidence import DecisionPolicy, decide_location
 from app.physics.doppler_engine import DopplerEngine
 from app.physics.flyover_fit import fit_flyover, kinematic_consistency
 from app.physics.matching import JointMatcher, MatchOptions, robust_rmse
+from app.physics.prefilter import prefilter_flights
 
 APP_VERSION = "1.2.0"
 DEFAULT_SPEED_OF_SOUND = 343.2
@@ -91,7 +96,9 @@ if settings.cors_origins:
     )
 
 opensky_client = OpenSkyClient()
-flight_manager = FlightManager(opensky_client, max_live_aircraft=settings.max_live_aircraft)
+flight_manager = FlightManager(opensky_client, historical_providers=build_providers(settings.cache_dir),
+                               max_live_aircraft=settings.max_live_aircraft)
+CONDITIONED_SOURCES = ("historical", "uploaded")
 
 
 class CurvePoint(BaseModel):
@@ -117,6 +124,11 @@ class GeolocateRequest(BaseModel):
     scenario_id: Optional[str] = Field(None, description="Explicitly use a curated demo scenario's trajectories")
     demo: bool = Field(False, description="Allow demo data (nearby curated scenario or synthetic flights) when no real ADS-B data exists")
     flight_id: Optional[str] = None
+    trajectories: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Uploaded tracks (e.g. from /api/flights/import); used instead of any ADS-B source")
+    icao24_hints: Optional[List[str]] = Field(None, description="Candidate aircraft for historical providers")
+    condition_tracks: bool = Field(True, description="Resample/smooth historical and uploaded tracks before matching")
+    prefilter: bool = Field(True, description="Discard kinematically / temporally impossible flights before the search")
     time_window_start: Optional[float] = None
     time_window_end: Optional[float] = None
     grid_resolution: Optional[int] = Field(25, ge=11, le=41)
@@ -140,6 +152,7 @@ class FlightSearchRequest(BaseModel):
     radius_km: float = 10.0
     scenario_id: Optional[str] = None
     demo: bool = False
+    icao24_hints: Optional[List[str]] = None
     time_window_start: Optional[float] = None
     time_window_end: Optional[float] = None
 
@@ -174,11 +187,11 @@ def list_scenarios():
     return scenarios
 
 
-def _find_flights(center_lat, center_lon, radius_km, t0, t1, scenario_id, demo) -> Dict[str, Any]:
+def _find_flights(center_lat, center_lon, radius_km, t0, t1, scenario_id, demo, icao24_hints=None) -> Dict[str, Any]:
     try:
         return flight_manager.find_flights(center_lat=center_lat, center_lon=center_lon, radius_km=radius_km,
                                            time_window_start=t0, time_window_end=t1,
-                                           scenario_id=scenario_id or None, demo=demo)
+                                           scenario_id=scenario_id or None, demo=demo, icao24_hints=icao24_hints)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
@@ -194,7 +207,7 @@ def search_flights(req: FlightSearchRequest):
     ``status`` is ``no_adsb_data`` when no real data exists.
     """
     found = _find_flights(req.center_lat, req.center_lon, req.radius_km, req.time_window_start,
-                          req.time_window_end, req.scenario_id, req.demo)
+                          req.time_window_end, req.scenario_id, req.demo, req.icao24_hints)
     return {"count": len(found["flights"]), "flights": found["flights"], "status": found["status"],
             "data_source": found["data_source"], "notes": found["notes"], "limitations": found["limitations"]}
 
@@ -286,6 +299,72 @@ def _safe_child(base: str, name: str) -> str:
     return path
 
 
+@app.post("/api/flights/import")
+def import_flights(
+    file: UploadFile = File(...),
+    format: Optional[str] = Form(None, description="csv, fr24_csv, kml, geojson or readsb (auto-detected if omitted)"),
+    altitude_unit: str = Form("auto"),
+    speed_unit: str = Form("auto"),
+    vertical_rate_unit: str = Form("auto"),
+    timezone: Optional[str] = Form(None, description="Zone for ISO times without an offset, e.g. UTC or +02:00"),
+    altitude_basis: Optional[str] = Form(None),
+):
+    """
+    Parse and validate uploaded aircraft tracks.  The returned trajectories
+    (``data_source="uploaded"``) can be passed back as ``trajectories`` in
+    ``/api/geolocate``; nothing is stored server-side.
+    """
+    fd, tmp = tempfile.mkstemp(suffix=".tracks")
+    os.close(fd)
+    try:
+        _save_upload(file, tmp)
+        with open(tmp, "rb") as fh:
+            data = fh.read()
+    finally:
+        os.remove(tmp)
+    try:
+        res = parse_tracks(data, file.filename or "", format, ImportOptions(
+            altitude_unit=altitude_unit, speed_unit=speed_unit, vertical_rate_unit=vertical_rate_unit,
+            timezone=timezone, altitude_basis=altitude_basis or None))
+    except TrackImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="The file could not be parsed as a track file.")
+    return {"count": len(res["flights"]), "format": res["format"], "flights": res["flights"],
+            "warnings": res["warnings"], "data_source": "uploaded"}
+
+
+@app.post("/api/audio/metadata")
+def audio_metadata(
+    file: Optional[UploadFile] = File(None),
+    sample_id: Optional[str] = Form(None),
+    saved_as: Optional[str] = Form(None),
+):
+    """Suggest the recording start time from file metadata (BWF bext / iXML / ffprobe). Always user-confirmable."""
+    tmp_path = None
+    try:
+        if file is not None:
+            ext = os.path.splitext(file.filename or "")[1].lower()
+            if ext not in AUDIO_EXTS:
+                raise HTTPException(status_code=400, detail="Unsupported audio format.")
+            fd, tmp_path = tempfile.mkstemp(suffix=ext)
+            os.close(fd)
+            _save_upload(file, tmp_path)
+            path = tmp_path
+        elif sample_id:
+            path = _safe_child(SAMPLES_DIR, f"{sample_id}.wav")
+        elif saved_as:
+            path = _safe_child(upload_dir(), saved_as)
+        else:
+            raise HTTPException(status_code=400, detail="Provide file, sample_id or saved_as.")
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail="Audio not found.")
+        return read_recording_start(path)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 @app.post("/api/geolocate")
 def geolocate(req: GeolocateRequest):
     """
@@ -293,13 +372,32 @@ def geolocate(req: GeolocateRequest):
     over a spatial grid with a shared recording clock, refine the best optima,
     run sensitivity checks and return a supported / inconclusive decision.
     """
+    return run_geolocation(req)
+
+
+def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
+    """Full geolocation pipeline shared by the synchronous endpoint and async jobs."""
     raw_events = _collect_events(req)
-    t0, t1 = req.time_window_start, req.time_window_end
-    if t0 is None and t1 is None and req.recording_start_epoch is not None:
-        # A trusted recording clock defines the ADS-B window to query.
-        t0, t1 = _recording_window(req, raw_events)
-    found = _find_flights(req.center_lat, req.center_lon, req.radius_km, t0, t1, req.scenario_id, req.demo)
-    flights = found["flights"]
+    c = speed_of_sound(req.temperature_c, req.relative_humidity_pct)
+    clock_window = None
+    if req.recording_start_epoch is not None:
+        clock_window = (req.recording_start_epoch - req.clock_tolerance_s, req.recording_start_epoch + req.clock_tolerance_s)
+
+    if req.trajectories:
+        try:
+            flights = [validate_uploaded_trajectory(t, i) for i, t in enumerate(req.trajectories)]
+        except TrackImportError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        found = {"data_source": "uploaded", "notes": [f"{len(flights)} uploaded track(s) supplied with the request."],
+                 "limitations": []}
+    else:
+        t0, t1 = req.time_window_start, req.time_window_end
+        if t0 is None and t1 is None and req.recording_start_epoch is not None:
+            # A trusted recording clock defines the ADS-B window to query.
+            t0, t1 = _recording_window(req, raw_events)
+        found = _find_flights(req.center_lat, req.center_lon, req.radius_km, t0, t1, req.scenario_id, req.demo,
+                              req.icao24_hints)
+        flights = found["flights"]
     provenance = {"data_source": found["data_source"], "data_notes": found["notes"],
                   "data_limitations": found["limitations"]}
     if not flights:
@@ -308,18 +406,27 @@ def geolocate(req: GeolocateRequest):
     if req.flight_id:
         target = [f for f in flights if f.get("flight_id") == req.flight_id]
         flights = target or flights
+    if req.condition_tracks:
+        flights = [condition_trajectory(f) if f.get("data_source") in CONDITIONED_SOURCES else f for f in flights]
 
-    c = speed_of_sound(req.temperature_c, req.relative_humidity_pct)
+    flyover_fits = _flyover_fits(raw_events, c)
+    discarded: List[Dict[str, Any]] = []
+    candidates = flights
+    if req.prefilter:
+        candidates, discarded = prefilter_flights(flights, raw_events, flyover_fits, clock_window, req.observer_alt_m)
+    provenance["discarded_flights"] = discarded
+    if not candidates:
+        decision = decide_location({"status": "no_match"}, n_events=len(raw_events))
+        return {"status": "no_match", "message": "Every candidate flight was excluded by the kinematic / time pre-filter.",
+                "decision": decision, "flyover_fits": flyover_fits,
+                "evaluated_flights": _flight_summaries(flights, [], flyover_fits, discarded), **provenance}
+
     opts = MatchOptions(
         speed_of_sound=c, fit_f0=req.fit_f0, drift_fraction=req.drift_fraction,
         loss_scale_hz=req.loss_scale_hz, observer_alt_m=req.observer_alt_m,
     )
-    clock_window = None
-    if req.recording_start_epoch is not None:
-        clock_window = (req.recording_start_epoch - req.clock_tolerance_s, req.recording_start_epoch + req.clock_tolerance_s)
-
     try:
-        matcher = JointMatcher(flights, raw_events, req.center_lat, req.center_lon, opts, clock_window)
+        matcher = JointMatcher(candidates, raw_events, req.center_lat, req.center_lon, opts, clock_window)
         res = matcher.run(req.radius_km, req.grid_resolution or 25, sensitivity=req.sensitivity,
                           precision_target_m=req.precision_target_m)
     except ValueError as e:
@@ -329,13 +436,12 @@ def geolocate(req: GeolocateRequest):
                             precision_target_m=req.precision_target_m)
     decision = decide_location(res, policy, clock_known=clock_window is not None, n_events=len(raw_events))
 
-    flyover_fits = _flyover_fits(raw_events, c)
     if res.get("status") != "ok":
         return {"status": "no_match", "message": res.get("message"), "decision": decision,
-                "flyover_fits": flyover_fits, "evaluated_flights": _flight_summaries(flights, [], flyover_fits),
+                "flyover_fits": flyover_fits, "evaluated_flights": _flight_summaries(flights, [], flyover_fits, discarded),
                 **provenance}
 
-    out = _format_result(matcher, res, decision, flights, flyover_fits, opts)
+    out = _format_result(matcher, res, decision, flights, flyover_fits, opts, discarded)
     out.update(provenance)
     return out
 
@@ -382,8 +488,9 @@ def _flyover_fits(raw_events: List[Dict[str, Any]], c: float) -> Dict[str, Any]:
     return fits
 
 
-def _flight_summaries(flights, diagnostics, flyover_fits) -> List[Dict[str, Any]]:
+def _flight_summaries(flights, diagnostics, flyover_fits, discarded=()) -> List[Dict[str, Any]]:
     out = []
+    dropped = {d["flight_id"]: d for d in discarded}
     for f in flights:
         fid = f.get("flight_id")
         matched = [d["event_id"] for d in diagnostics if d.get("flight_id") == fid and d.get("matched")]
@@ -392,11 +499,14 @@ def _flight_summaries(flights, diagnostics, flyover_fits) -> List[Dict[str, Any]
             "flight_id": fid, "callsign": f.get("callsign"), "aircraft_type": f.get("aircraft_type"),
             "data_source": f.get("data_source"), "altitude_basis": f.get("altitude_basis"),
             "matched_events": matched, "kinematic_consistency": kin,
+            "discarded": fid in dropped, "discard_reasons": dropped.get(fid, {}).get("groups", []),
+            "conditioning": f.get("conditioning"),
         })
     return out
 
 
-def _format_result(matcher: JointMatcher, res, decision, flights, flyover_fits, opts: MatchOptions) -> Dict[str, Any]:
+def _format_result(matcher: JointMatcher, res, decision, flights, flyover_fits, opts: MatchOptions,
+                   discarded=()) -> Dict[str, Any]:
     G = matcher.grid
     n_groups = res["n_groups"]
     sigma = 3.0 * opts.loss_scale_hz
@@ -478,7 +588,7 @@ def _format_result(matcher: JointMatcher, res, decision, flights, flyover_fits, 
             for m in matcher.models if m.flight_id in matched_flight_ids
         ],
         "f0_hz": primary.get("f0_hz"),
-        "evaluated_flights": _flight_summaries(flights, diags, flyover_fits),
+        "evaluated_flights": _flight_summaries(flights, diags, flyover_fits, discarded),
         "grid_resolution": int(G["X"].shape[0]),
         "speed_of_sound_mps": opts.speed_of_sound,
         "clock_mode": "trusted_window" if matcher.clock_window else "free",
@@ -499,6 +609,7 @@ def upload_audio(file: UploadFile = File(...)):
     dest_path = os.path.join(upload_dir(), unique_filename)
     size = _save_upload(file, dest_path)
     return {
+        "recording_metadata": read_recording_start(dest_path),
         "filename": file.filename,
         "saved_as": unique_filename,
         "url": f"/api/audio/uploads/{unique_filename}",

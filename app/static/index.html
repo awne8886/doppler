@@ -174,6 +174,7 @@
                     <div class="input-field">
                         <label for="clockInput">Recording start (UTC, optional):</label>
                         <input type="text" id="clockInput" placeholder="ISO 8601 or Unix epoch">
+                        <span id="clockNote" class="field-note"></span>
                     </div>
                     <div class="input-field">
                         <label for="clockTolInput">Clock tolerance (&plusmn;s):</label>
@@ -191,6 +192,40 @@
                         <label><input type="checkbox" id="fitF0Check" checked> Fit f&#8320; per event</label>
                         <label><input type="checkbox" id="sensitivityCheck" checked> Sensitivity analysis</label>
                         <label title="Without this, only real ADS-B data (live, historical or uploaded tracks) is used. Demo data cannot locate a real recording."><input type="checkbox" id="demoCheck"> Allow demo / synthetic flights</label>
+                    </div>
+                </div>
+
+                <div class="tracks-box">
+                    <h4>Real ADS-B tracks for this recording</h4>
+                    <p class="small-text">Live data only covers the last couple of minutes. For an older recording, import the
+                        aircraft tracks (CSV, FlightRadar24 CSV, KML, GeoJSON or readsb/tar1090 trace JSON), or give icao24
+                        hex codes for the server's historical provider.</p>
+                    <div class="params-grid">
+                        <div class="input-field">
+                            <label for="trackFileInput">Track file(s):</label>
+                            <input type="file" id="trackFileInput" multiple accept=".csv,.kml,.geojson,.json,.gz,.txt">
+                        </div>
+                        <div class="input-field">
+                            <label for="trackAltUnit">Altitude unit (if not in header):</label>
+                            <select id="trackAltUnit">
+                                <option value="auto" selected>auto (from header/format)</option>
+                                <option value="ft">feet</option>
+                                <option value="m">metres</option>
+                            </select>
+                        </div>
+                        <div class="input-field">
+                            <label for="trackTz">Time zone for times without offset:</label>
+                            <input type="text" id="trackTz" placeholder="e.g. UTC or +02:00">
+                        </div>
+                        <div class="input-field">
+                            <label for="icaoHintsInput">icao24 hints (historical, optional):</label>
+                            <input type="text" id="icaoHintsInput" placeholder="a1b2c3, 4ca7f2">
+                        </div>
+                    </div>
+                    <div class="action-row compact">
+                        <button id="importTracksBtn" class="btn btn-sm btn-secondary">Import tracks</button>
+                        <button id="clearTracksBtn" class="btn btn-sm">Clear imported</button>
+                        <span id="trackStatus" class="small-text">No tracks imported.</span>
                     </div>
                 </div>
 
@@ -315,6 +350,7 @@
     <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" integrity="sha384-mFKkGiGvT5vo1fEyGCD3hshDdKmW3wzXW/x+fWriYJArD0R3gawT6lMvLboM22c0" crossorigin=""></script>
 
     <script src="./js/util.js"></script>
+    <script src="./js/track_import.js"></script>
     <script src="./js/doppler_analysis.js"></script>
     <script src="./js/adsb_manager.js"></script>
     <script src="./js/api_client.js"></script>

@@ -88,10 +88,16 @@ class ApiClient {
         const events = (payload.events && payload.events.length)
             ? payload.events
             : [{ id: 'E1', traced_curve: payload.traced_curve, f0: payload.f0 }];
-        const found = window.clientFlights.findFlights(
-            payload.center_lat, payload.center_lon, payload.radius_km, payload.scenario_id,
-            { demo: !!payload.demo, timeWindowStart: payload.time_window_start }
-        );
+        let found;
+        if (payload.trajectories && payload.trajectories.length) {
+            found = { status: 'ok', data_source: 'uploaded', notes: [`${payload.trajectories.length} uploaded track(s) supplied with the request.`], limitations: [],
+                flights: payload.trajectories.map(t => Object.assign({}, t, { data_source: 'uploaded' })) };
+        } else {
+            found = window.clientFlights.findFlights(
+                payload.center_lat, payload.center_lon, payload.radius_km, payload.scenario_id,
+                { demo: !!payload.demo, timeWindowStart: payload.time_window_start }
+            );
+        }
         let flights = found.flights;
         const provenance = { data_source: found.data_source, data_notes: found.notes, data_limitations: found.limitations };
         if (!flights || flights.length === 0) {
@@ -101,6 +107,9 @@ class ApiClient {
         if (payload.flight_id) {
             const target = flights.filter(f => f.flight_id === payload.flight_id);
             if (target.length) flights = target;
+        }
+        if (payload.condition_tracks !== false) {
+            flights = flights.map(f => (['historical', 'uploaded'].includes(f.data_source) ? DA.conditionTrajectory(f) : f));
         }
         const c = DA.speedOfSoundFor(payload.temperature_c, payload.relative_humidity_pct);
         const opts = {
@@ -115,7 +124,32 @@ class ApiClient {
             ? [payload.recording_start_epoch - (payload.clock_tolerance_s ?? 2), payload.recording_start_epoch + (payload.clock_tolerance_s ?? 2)]
             : null;
 
-        const matcher = new DA.JointMatcher(flights, events, payload.center_lat, payload.center_lon, opts, clock);
+        const flyoverFits = {};
+        for (const ev of events) {
+            const pts = ev.traced_curve || [];
+            if (pts.length < 5) continue;
+            try { flyoverFits[ev.id] = DA.FlyoverFit.fit(pts.map(p => p.time), pts.map(p => p.freq), c); } catch (e) { /* skip */ }
+        }
+        let candidates = flights, discarded = [];
+        if (payload.prefilter !== false) {
+            ({ kept: candidates, discarded } = DA.prefilterFlights(flights, events, flyoverFits, clock, opts.observer_alt_m));
+        }
+        provenance.discarded_flights = discarded;
+        const summaries = (diags) => flights.map(f => {
+            const d = discarded.find(x => x.flight_id === f.flight_id);
+            return {
+                flight_id: f.flight_id, callsign: f.callsign, aircraft_type: f.aircraft_type,
+                data_source: f.data_source, altitude_basis: f.altitude_basis,
+                matched_events: diags.filter(x => x.flight_id === f.flight_id && x.matched).map(x => x.event_id),
+                discarded: !!d, discard_reasons: d ? d.groups : [], conditioning: f.conditioning || null,
+            };
+        });
+        if (!candidates.length) {
+            return { status: 'no_match', message: 'Every candidate flight was excluded by the kinematic / time pre-filter.',
+                decision: DA.decideLocation({ status: 'no_match' }, {}, events.length), flyover_fits: flyoverFits,
+                evaluated_flights: summaries([]), mode: 'client_physics', ...provenance };
+        }
+        const matcher = new DA.JointMatcher(candidates, events, payload.center_lat, payload.center_lon, opts, clock);
         const res = await matcher.run(payload.radius_km, payload.grid_resolution || 21, {
             sensitivity: payload.sensitivity !== false, onProgress,
         });
@@ -125,14 +159,8 @@ class ApiClient {
             precision_target_m: payload.precision_target_m || 1000,
         }, events.length);
 
-        const flyoverFits = {};
-        for (const ev of events) {
-            const pts = ev.traced_curve || [];
-            if (pts.length < 5) continue;
-            try { flyoverFits[ev.id] = DA.FlyoverFit.fit(pts.map(p => p.time), pts.map(p => p.freq), c); } catch (e) { /* skip */ }
-        }
         if (res.status !== 'ok') {
-            return { status: 'no_match', message: res.message, decision, flyover_fits: flyoverFits, mode: 'client_physics', ...provenance };
+            return { status: 'no_match', message: res.message, decision, flyover_fits: flyoverFits, evaluated_flights: summaries([]), mode: 'client_physics', ...provenance };
         }
 
         const sigma = 3 * opts.loss_scale_hz;
@@ -191,11 +219,7 @@ class ApiClient {
                 data_source: m.raw.data_source, latitudes: m.raw.latitudes, longitudes: m.raw.longitudes,
             })),
             f0_hz: primary.f0_hz,
-            evaluated_flights: flights.map(f => ({
-                flight_id: f.flight_id, callsign: f.callsign, aircraft_type: f.aircraft_type,
-                data_source: f.data_source, altitude_basis: f.altitude_basis,
-                matched_events: diags.filter(d => d.flight_id === f.flight_id && d.matched).map(d => d.event_id),
-            })),
+            evaluated_flights: summaries(diags),
             grid_resolution: payload.grid_resolution || 21,
             speed_of_sound_mps: c,
             clock_mode: clock ? 'trusted_window' : 'free',
@@ -224,6 +248,25 @@ class ApiClient {
         return window.DopplerAnalysis.RidgeDiscovery.discover(audioBuffer, settings);
     }
 
+    /**
+     * Import aircraft tracks (CSV / FR24 CSV / KML / GeoJSON / readsb trace).
+     * Uses the server when available, otherwise parses in the browser.
+     */
+    async importTracks(file, options = {}) {
+        const hasBackend = await this.checkBackend();
+        if (hasBackend) {
+            const form = new FormData();
+            form.append('file', file);
+            for (const [k, v] of Object.entries(options)) if (v != null && v !== '') form.append(k, v);
+            const resp = await fetch(`${this.baseUrl}/api/flights/import`, { method: 'POST', body: form });
+            const body = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+            return Object.assign(body, { mode: 'server' });
+        }
+        const res = await window.TrackImport.parseTrackFile(file, options.format || null, options);
+        return Object.assign(res, { mode: 'client' });
+    }
+
     async uploadAudio(file) {
         const hasBackend = await this.checkBackend();
         if (hasBackend) {
@@ -239,7 +282,13 @@ class ApiClient {
                 // Client-side fallback handled by FileReader
             }
         }
-        return { filename: file.name, url: URL.createObjectURL(file) };
+        let meta = null;
+        if (/\.wav$/i.test(file.name || '')) {
+            try { meta = window.DopplerUtil.readWavStart(await file.arrayBuffer()); } catch (e) { meta = null; }
+        }
+        return { filename: file.name, url: URL.createObjectURL(file),
+            recording_metadata: meta || { start_epoch: null, source: null, timezone_known: false, requires_confirmation: true,
+                notes: ['No recording start time found in the file metadata (the browser reads Broadcast-WAV bext/iXML only).'] } };
     }
 }
 

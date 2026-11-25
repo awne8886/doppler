@@ -24,6 +24,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const autoRidgeBtn = document.getElementById('autoRidgeBtn');
     const discoveryStatus = document.getElementById('discoveryStatus');
     const clockInput = document.getElementById('clockInput');
+    const clockNote = document.getElementById('clockNote');
+    const trackStatus = document.getElementById('trackStatus');
+    let importedTracks = [];
 
     // Helper to toggle spinner
     const showLoading = (msg = 'Processing acoustic physics...') => {
@@ -99,6 +102,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 window.mapView.displayFlightTrajectories(flightResp.flights);
             }
             clockInput.value = '';
+            clockNote.textContent = '';
             clockInput.placeholder = scenario && scenario.recording_start_epoch
                 ? `optional, e.g. ${new Date(scenario.recording_start_epoch * 1000).toISOString()}`
                 : 'ISO 8601 or Unix epoch';
@@ -225,6 +229,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 const up = await window.apiClient.uploadAudio(file);
                 currentSavedAs = up && up.saved_as ? up.saved_as : null;
+                applyRecordingMetadata(up && up.recording_metadata);
             } catch (e) {
                 console.warn('Server audio cache notice:', e);
             }
@@ -236,6 +241,49 @@ document.addEventListener('DOMContentLoaded', async () => {
             hideLoading();
         }
     }
+
+    /** Prefill the clock from file metadata. It stays a suggestion the user must confirm. */
+    function applyRecordingMetadata(meta) {
+        clockNote.textContent = '';
+        if (!meta || meta.start_epoch == null) {
+            clockInput.value = '';
+            if (meta && meta.notes && meta.notes.length) clockNote.textContent = meta.notes[0];
+            return;
+        }
+        clockInput.value = new Date(meta.start_epoch * 1000).toISOString();
+        const tz = meta.timezone_known ? 'UTC per file metadata' : 'time zone unknown, read as UTC';
+        clockNote.textContent = `Prefilled from ${meta.source} (${tz}). Confirm before relying on it. ${(meta.notes || [])[0] || ''}`;
+    }
+
+    // 4b. Real-track import
+    document.getElementById('importTracksBtn').addEventListener('click', async () => {
+        const files = [...document.getElementById('trackFileInput').files];
+        if (!files.length) { alert('Choose one or more track files first.'); return; }
+        const options = {
+            altitude_unit: document.getElementById('trackAltUnit').value,
+            timezone: document.getElementById('trackTz').value.trim() || null,
+        };
+        showLoading('Importing and validating aircraft tracks...');
+        const warnings = [];
+        try {
+            for (const f of files) {
+                const res = await window.apiClient.importTracks(f, options);
+                importedTracks = importedTracks.concat(res.flights || []);
+                warnings.push(...(res.warnings || []));
+            }
+            window.mapView.displayFlightTrajectories(importedTracks);
+            trackStatus.textContent = `${importedTracks.length} uploaded track(s) will be used instead of live/demo ADS-B.`
+                + (warnings.length ? ` Warnings: ${warnings.join(' ')}` : '');
+        } catch (err) {
+            trackStatus.textContent = `Import failed: ${err.message}`;
+        } finally {
+            hideLoading();
+        }
+    });
+    document.getElementById('clearTracksBtn').addEventListener('click', () => {
+        importedTracks = [];
+        trackStatus.textContent = 'No tracks imported.';
+    });
 
     // 5. Preset selection
     loadPresetBtn.addEventListener('click', () => {
@@ -321,6 +369,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 grid_resolution: gridRes,
                 sensitivity: document.getElementById('sensitivityCheck').checked,
             };
+            if (importedTracks.length) {
+                payload.trajectories = importedTracks;
+                payload.scenario_id = null;
+            }
+            const hints = document.getElementById('icaoHintsInput').value.split(/[\s,;]+/).filter(Boolean);
+            if (hints.length) payload.icao24_hints = hints;
             if (clock !== null) {
                 payload.recording_start_epoch = clock;
                 payload.clock_tolerance_s = parseFloat(document.getElementById('clockTolInput').value) || 0;

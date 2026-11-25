@@ -113,7 +113,13 @@ class TrajectoryModel:
         alt = np.asarray(traj["altitudes"], dtype=np.float64)[order] + altitude_bias_m
         x, y, z = engine.geodetic_to_cartesian(lat, lon, alt, center_lat, center_lon, 0.0)
         self.pos = np.stack([x, y, z], axis=1)
-        self.vel = np.stack([np.gradient(x, self.t_emit), np.gradient(y, self.t_emit), np.gradient(z, self.t_emit)], axis=1)
+        explicit = [traj.get(k) for k in ("velocity_east", "velocity_north", "velocity_up")]
+        if all(v is not None and len(v) == t.size for v in explicit):
+            # Conditioned tracks carry fused (reported + smoothed) velocities; use them as-is.
+            self.vel = np.stack([np.asarray(v, dtype=np.float64)[order] for v in explicit], axis=1)
+        else:
+            self.vel = np.stack([np.gradient(x, self.t_emit), np.gradient(y, self.t_emit),
+                                 np.gradient(z, self.t_emit)], axis=1)
         gaps = np.diff(self.t_emit)
         self.gap_after = np.where(gaps > max_gap_s)[0]
 

@@ -945,3 +945,14 @@ select:focus, input:focus {
 }
 .event-results .check-pill.pass { color: var(--accent-green); border-color: rgba(16, 185, 129, 0.5); }
 .event-results .check-pill.fail { color: var(--accent-amber); border-color: rgba(245, 158, 11, 0.5); }
+
+/* ---- Real-track import box & field notes ---- */
+.tracks-box {
+    margin-top: 14px;
+    padding: 12px;
+    border: 1px dashed rgba(148, 163, 184, 0.35);
+    border-radius: 8px;
+}
+.tracks-box h4 { margin: 0 0 6px; font-size: 0.85rem; letter-spacing: 0.04em; }
+.action-row.compact { margin-top: 8px; gap: 10px; align-items: center; flex-wrap: wrap; }
+.field-note { display: block; font-size: 0.72rem; color: #fbbf24; margin-top: 4px; min-height: 0; }

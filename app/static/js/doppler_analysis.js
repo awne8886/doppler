@@ -510,11 +510,23 @@
             const idx = [...Array(n).keys()].sort((a, b) => traj.timestamps[a] - traj.timestamps[b]);
             this.t = idx.map(i => traj.timestamps[i]);
             this.pos = idx.map(i => engine.geodeticToCartesian(traj.latitudes[i], traj.longitudes[i], traj.altitudes[i] + altBias, centerLat, centerLon, 0));
-            this.vel = this.pos.map((p, i) => {
-                const a = Math.max(0, i - 1), b = Math.min(n - 1, i + 1);
-                const dt = Math.max(1e-3, this.t[b] - this.t[a]);
-                return { vx: (this.pos[b].x - this.pos[a].x) / dt, vy: (this.pos[b].y - this.pos[a].y) / dt, vz: (this.pos[b].z - this.pos[a].z) / dt };
-            });
+            const ve = traj.velocity_east, vn = traj.velocity_north, vu = traj.velocity_up;
+            if (ve && vn && vu && ve.length === n && vn.length === n && vu.length === n) {
+                // Conditioned tracks carry fused (reported + smoothed) velocities; use them as-is.
+                this.vel = idx.map(i => ({ vx: ve[i], vy: vn[i], vz: vu[i] }));
+            } else {
+                // np.gradient semantics: one-sided at the ends, non-uniform central differences inside.
+                this.vel = this.pos.map((p, i) => {
+                    if (n < 2) return { vx: 0, vy: 0, vz: 0 };
+                    if (i === 0 || i === n - 1) {
+                        const a = i === 0 ? 0 : n - 2, b = a + 1, dt = Math.max(1e-9, this.t[b] - this.t[a]);
+                        return { vx: (this.pos[b].x - this.pos[a].x) / dt, vy: (this.pos[b].y - this.pos[a].y) / dt, vz: (this.pos[b].z - this.pos[a].z) / dt };
+                    }
+                    const h1 = this.t[i] - this.t[i - 1], h2 = this.t[i + 1] - this.t[i];
+                    const g = (k) => (h1 * h1 * this.pos[i + 1][k] + (h2 * h2 - h1 * h1) * this.pos[i][k] - h2 * h2 * this.pos[i - 1][k]) / (h1 * h2 * (h1 + h2));
+                    return { vx: g('x'), vy: g('y'), vz: g('z') };
+                });
+            }
             this.gapAfter = [];
             for (let i = 0; i < n - 1; i++) if (this.t[i + 1] - this.t[i] > maxGap) this.gapAfter.push(i);
         }
@@ -886,6 +898,180 @@
         return Object.assign({}, ev, { t: idx.map(i => ev.t[i]), f: idx.map(i => ev.f[i]) });
     }
 
+    // ---------------------------------------------- trajectory conditioning
+    // Mirrors app/adsb/conditioning.py: Gaussian-kernel local quadratic regression
+    // onto a 1 s grid per gap-free segment, fused with reported velocities.
+    function localQuadratic(t, y, tq, h) {
+        const reach = 4 * h, n = t.length;
+        const val = new Array(tq.length), der = new Array(tq.length);
+        for (let q = 0; q < tq.length; q++) {
+            const tc = tq[q];
+            let lo = lowerBound(t, tc - reach);
+            let s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, r0 = 0, r1 = 0, r2 = 0;
+            for (let j = lo; j < n && t[j] <= tc + reach; j++) {
+                const d = t[j] - tc, w = Math.exp(-0.5 * (d / h) ** 2), d2 = d * d;
+                s0 += w; s1 += w * d; s2 += w * d2; s3 += w * d2 * d; s4 += w * d2 * d2;
+                r0 += w * y[j]; r1 += w * d * y[j]; r2 += w * d2 * y[j];
+            }
+            const det = s0 * (s2 * s4 - s3 * s3) - s1 * (s1 * s4 - s3 * s2) + s2 * (s1 * s3 - s2 * s2);
+            const det2 = s0 * s2 - s1 * s1;
+            if (Math.abs(det) > 1e-9 * Math.max(Math.abs(s0 * s2 * s4), 1e-300)) {
+                val[q] = (r0 * (s2 * s4 - s3 * s3) - s1 * (r1 * s4 - s3 * r2) + s2 * (r1 * s3 - s2 * r2)) / det;
+                der[q] = (s0 * (r1 * s4 - s3 * r2) - r0 * (s1 * s4 - s3 * s2) + s2 * (s1 * r2 - r1 * s2)) / det;
+            } else if (Math.abs(det2) > 1e-9 * Math.max(Math.abs(s0 * s2), 1e-300)) {
+                val[q] = (s2 * r0 - s1 * r1) / det2;
+                der[q] = (s0 * r1 - s1 * r0) / det2;
+            } else {
+                val[q] = r0 / Math.max(s0, 1e-300);
+                der[q] = 0;
+            }
+        }
+        return { val, der };
+    }
+
+    function conditionTrajectory(traj, { maxGapS = 20, dt = 1, bandwidthS = null, reportedWeight = 0.7 } = {}) {
+        const R = 6371000, rad = Math.PI / 180;
+        const nRaw = traj.timestamps.length;
+        const order = [...Array(nRaw).keys()].sort((a, b) => traj.timestamps[a] - traj.timestamps[b] || a - b);
+        const idx = [];
+        for (const i of order) if (!idx.length || traj.timestamps[i] - traj.timestamps[idx[idx.length - 1]] > 1e-6) idx.push(i);
+        if (idx.length < 2) return Object.assign({}, traj);
+        const t = idx.map(i => traj.timestamps[i]);
+        const lat = idx.map(i => traj.latitudes[i]), lon = idx.map(i => traj.longitudes[i]), alt = idx.map(i => traj.altitudes[i]);
+        const lat0 = lat[0], lon0 = lon[0];
+        const x = lat.map((la, k) => R * (lon[k] - lon0) * rad * Math.cos(0.5 * (la + lat0) * rad));
+        const y = lat.map(la => R * (la - lat0) * rad);
+        const rep = (key) => {
+            const a = traj[key] || [];
+            return a.length === nRaw && a.every(v => v != null) ? idx.map(i => a[i]) : null;
+        };
+        const gs = rep('speeds'), trk = rep('headings'), vr = rep('vertical_rates');
+        const hasH = !!(gs && trk);
+        const veRep = hasH ? gs.map((g, k) => g * Math.sin(trk[k] * rad)) : null;
+        const vnRep = hasH ? gs.map((g, k) => g * Math.cos(trk[k] * rad)) : null;
+        const segs = [];
+        let a = 0;
+        for (let k = 1; k <= t.length; k++) if (k === t.length || t[k] - t[k - 1] > maxGapS) { segs.push([a, k]); a = k; }
+        const T = [], X = [], Y = [], Z = [], VE = [], VN = [], VU = [], hs = [];
+        let nSeg = 0;
+        for (const [s0, s1] of segs) {
+            if (s1 - s0 < 2) continue;
+            nSeg++;
+            const ts = t.slice(s0, s1), sl = (arr) => arr.slice(s0, s1);
+            const nOut = Math.floor((ts[ts.length - 1] - ts[0]) / dt + 1e-9) + 1;
+            const tg = [...Array(nOut).keys()].map(k => ts[0] + dt * k);
+            if (tg[tg.length - 1] < ts[ts.length - 1] - 1e-6) tg.push(ts[ts.length - 1]);
+            const diffs = ts.slice(1).map((v, k) => v - ts[k]);
+            const h = bandwidthS != null ? bandwidthS : Math.min(30, Math.max(2, 2 * median(diffs)));
+            hs.push(h);
+            const px = localQuadratic(ts, sl(x), tg, h), py = localQuadratic(ts, sl(y), tg, h), pz = localQuadratic(ts, sl(alt), tg, h);
+            let dx = px.der, dy = py.der, dz = pz.der;
+            if (hasH) {
+                const re = localQuadratic(ts, sl(veRep), tg, h).val, rn = localQuadratic(ts, sl(vnRep), tg, h).val;
+                dx = dx.map((v, k) => reportedWeight * re[k] + (1 - reportedWeight) * v);
+                dy = dy.map((v, k) => reportedWeight * rn[k] + (1 - reportedWeight) * v);
+            }
+            if (vr) {
+                const rz = localQuadratic(ts, sl(vr), tg, h).val;
+                dz = dz.map((v, k) => reportedWeight * rz[k] + (1 - reportedWeight) * v);
+            }
+            T.push(...tg); X.push(...px.val); Y.push(...py.val); Z.push(...pz.val); VE.push(...dx); VN.push(...dy); VU.push(...dz);
+        }
+        if (!T.length) return Object.assign({}, traj);
+        const LAT = Y.map(v => lat0 + v / R / rad);
+        const LON = X.map((v, k) => lon0 + v / (R * Math.cos(0.5 * (LAT[k] + lat0) * rad)) / rad);
+        const out = Object.assign({}, traj);
+        Object.assign(out, {
+            timestamps: T, latitudes: LAT, longitudes: LON, altitudes: Z,
+            velocity_east: VE, velocity_north: VN, velocity_up: VU,
+            speeds: VE.map((v, k) => Math.hypot(v, VN[k])),
+            headings: VE.map((v, k) => ((Math.atan2(v, VN[k]) / rad) % 360 + 360) % 360),
+            vertical_rates: VU.slice(),
+            conditioning: {
+                method: 'gaussian_local_quadratic', bandwidth_s: hs.length ? median(hs) : null, resample_dt_s: dt,
+                segments: nSeg, max_gap_s: maxGapS, fused_reported_velocity: hasH, fused_reported_vertical_rate: !!vr,
+                reported_weight: reportedWeight, input_points: nRaw, output_points: T.length,
+            },
+        });
+        return out;
+    }
+
+    // ------------------------------------------------------------- prefilter
+    // Mirrors app/physics/prefilter.py (fixed tolerances, identical decisions).
+    const PREFILTER = { speedTolMin: 30, speedTolFrac: 0.25, slantTolMin: 800, slantTolFrac: 0.6, maxDelayS: 200, fitMaxRmse: 4, fitMinSamples: 8 };
+
+    function fitIsReliable(fit) {
+        if (!fit) return false;
+        const at = fit.parameter_at_bound || {};
+        const v = +fit.speed_mps || 0, d = +fit.cpa_slant_m || 0;
+        const atBound = !!(at.speed || at.distance) || !(v > 15.5 && v < 329.5) || !(d > 31 && d < 39990);
+        return (fit.n_samples || 0) >= PREFILTER.fitMinSamples && (fit.rmse_hz != null ? fit.rmse_hz : 1e9) <= PREFILTER.fitMaxRmse && !atBound;
+    }
+
+    function flightGroundSpeed(traj) {
+        const sp = (traj.speeds || []).filter(v => v != null);
+        if (sp.length) return median(sp);
+        const t = traj.timestamps || [];
+        if (t.length < 2) return null;
+        const rad = Math.PI / 180, v = [];
+        for (let i = 1; i < t.length; i++) {
+            const dt = t[i] - t[i - 1];
+            if (dt <= 0) continue;
+            const la1 = traj.latitudes[i - 1] * rad, la2 = traj.latitudes[i] * rad;
+            const dx = 6371000 * (traj.longitudes[i] - traj.longitudes[i - 1]) * rad * Math.cos(0.5 * (la1 + la2));
+            const dy = 6371000 * (la2 - la1);
+            v.push(Math.hypot(dx, dy) / dt);
+        }
+        return v.length ? median(v) : null;
+    }
+
+    function prefilterFlights(flights, rawEvents, flyoverFits, clockWindow = null, observerAltM = 0) {
+        const spans = new Map();
+        rawEvents.forEach((ev, i) => {
+            const pts = ev.traced_curve || ev.points || [];
+            if (!pts.length) return;
+            const eid = String(ev.id || `E${i + 1}`), gid = String(ev.group_id || eid);
+            const lo = Math.min(...pts.map(p => p.time)), hi = Math.max(...pts.map(p => p.time));
+            const cur = spans.get(gid);
+            spans.set(gid, cur ? [Math.min(cur[0], lo), Math.max(cur[1], hi), cur[2].concat([eid])] : [lo, hi, [eid]]);
+        });
+        const groupFit = new Map();
+        for (const [gid, [, , ids]] of spans) {
+            const fits = ids.map(e => flyoverFits[e]).filter(fitIsReliable);
+            if (fits.length) groupFit.set(gid, fits.reduce((a, b) => ((b.n_samples || 0) > (a.n_samples || 0) ? b : a)));
+        }
+        const kept = [], discarded = [];
+        for (const f of flights) {
+            const t = f.timestamps || [];
+            const vg = flightGroundSpeed(f);
+            const alts = (f.altitudes || []).filter(a => a != null);
+            const minH = alts.length ? Math.min(...alts) - observerAltM : null;
+            let excludedAll = spans.size > 0;
+            const reasons = [];
+            for (const [gid, [lo, hi]] of spans) {
+                const why = [];
+                if (clockWindow && t.length) {
+                    const aLo = t[0], aHi = t[t.length - 1] + PREFILTER.maxDelayS;
+                    if (clockWindow[1] + hi < aLo || clockWindow[0] + lo > aHi) {
+                        why.push({ reason: 'no_time_overlap', event_window: [+(clockWindow[0] + lo).toFixed(1), +(clockWindow[1] + hi).toFixed(1)], flight_arrival_window: [+aLo.toFixed(1), +aHi.toFixed(1)] });
+                    }
+                }
+                const fit = groupFit.get(gid);
+                if (fit) {
+                    const vFit = +fit.speed_mps, dFit = +fit.cpa_slant_m;
+                    const vTol = Math.max(PREFILTER.speedTolMin, PREFILTER.speedTolFrac * vFit);
+                    const dTol = Math.max(PREFILTER.slantTolMin, PREFILTER.slantTolFrac * dFit);
+                    if (vg != null && Math.abs(vg - vFit) > vTol) why.push({ reason: 'speed_incompatible', flight_speed_mps: +vg.toFixed(1), fitted_speed_mps: +vFit.toFixed(1), tolerance_mps: +vTol.toFixed(1) });
+                    if (minH != null && minH > dFit + dTol) why.push({ reason: 'height_incompatible', min_height_above_observer_m: +minH.toFixed(1), fitted_cpa_slant_m: +dFit.toFixed(1), tolerance_m: +dTol.toFixed(1) });
+                }
+                if (why.length) reasons.push({ group_id: gid, reasons: why }); else excludedAll = false;
+            }
+            if (excludedAll) discarded.push({ flight_id: f.flight_id, callsign: f.callsign, data_source: f.data_source, groups: reasons });
+            else kept.push(f);
+        }
+        return { kept, discarded };
+    }
+
     // ------------------------------------------------------------- decision
     const DEFAULT_POLICY = {
         name: 'engineering-v1', max_rmse_hz: 3.0, max_outlier_fraction: 0.25, min_support_fraction: 0.95,
@@ -962,5 +1148,6 @@
     window.DopplerAnalysis = {
         FlyoverFit, RidgeDiscovery, JointMatcher, TrajectoryModel, GeoEngine, decideLocation, robustRmse, nelderMead,
         fitEventAt, speedOfSound, speedOfSoundFor, DEFAULT_MATCH, DEFAULT_POLICY, REASONS,
+        conditionTrajectory, localQuadratic, prefilterFlights, fitIsReliable, flightGroundSpeed, PREFILTER,
     };
 })(typeof window !== 'undefined' ? window : globalThis);

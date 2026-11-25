@@ -117,6 +117,7 @@ class FlightManager:
         time_window_end: Optional[float] = None,
         scenario_id: Optional[str] = None,
         demo: bool = False,
+        icao24_hints: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """
         Resolve candidate trajectories and report where they came from.
@@ -138,13 +139,14 @@ class FlightManager:
             if t0 is None or not provider.available():
                 continue
             try:
-                res = provider.get_tracks(center_lat, center_lon, radius_km, t0, t1)
+                res = provider.get_tracks(center_lat, center_lon, radius_km, t0, t1, icao24_hints=icao24_hints)
             except Exception as e:  # pragma: no cover - providers handle their own errors
                 logger.warning("Historical provider %s failed: %s", getattr(provider, "name", provider), e)
                 continue
             notes.extend(res.get("notes", []))
             if res.get("flights"):
-                return self._ok("historical", res["flights"], notes, res.get("limitations", []))
+                return self._ok("historical", tag_trajectories(res["flights"], "historical"), notes,
+                                res.get("limitations", []))
 
         if self._live_applicable(t0, t1):
             live = self._live_flights(center_lat, center_lon, radius_km)
@@ -157,6 +159,8 @@ class FlightManager:
             notes.extend(live["notes"])
         elif t0 is not None:
             notes.append("Requested time window is not recent; live ADS-B snapshots were not used.")
+            if not self.historical_providers:
+                notes.append("No historical ADS-B provider is configured (set OPENSKY_CLIENT_ID / OPENSKY_CLIENT_SECRET).")
 
         if demo:
             for s_id, s_data in self.scenarios.items():
