@@ -836,3 +836,112 @@ select:focus, input:focus {
     color: var(--accent-cyan);
 }
 
+
+/* ---------------------------------------------------------------
+   Automatic ridge discovery, multi-event list & evidence decision
+   --------------------------------------------------------------- */
+.btn-accent {
+    background: linear-gradient(135deg, #7c3aed 0%, #06b6d4 100%);
+    color: #fff;
+    border-color: transparent;
+}
+.btn-accent:hover { filter: brightness(1.15); }
+
+.discovery-status {
+    margin-top: 0.6rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+.discovery-status.warn { color: var(--accent-amber); }
+
+.event-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+}
+.event-chip {
+    --chip-color: var(--accent-cyan);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.55rem;
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--chip-color);
+    border-radius: 6px;
+    background: var(--bg-darkest);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    max-width: 100%;
+}
+.event-chip.active { border-color: var(--chip-color); box-shadow: 0 0 0 1px var(--chip-color); }
+.event-chip.excluded { opacity: 0.5; }
+.event-chip .chip-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--chip-color);
+    flex-shrink: 0;
+}
+.event-chip .chip-text { overflow: hidden; text-overflow: ellipsis; }
+.event-chip em { color: var(--accent-amber); font-style: normal; }
+
+.checkbox-field label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--text-primary);
+}
+
+.decision-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0.65rem 0.85rem;
+    margin: 0.75rem 0;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-darkest);
+}
+.decision-banner .decision-status {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    font-size: 0.85rem;
+}
+.decision-banner .decision-msg { font-size: 0.8rem; color: var(--text-secondary); }
+.decision-banner.supported { border-color: var(--accent-green); background: rgba(16, 185, 129, 0.08); }
+.decision-banner.supported .decision-status { color: var(--accent-green); }
+.decision-banner.inconclusive { border-color: var(--accent-amber); background: rgba(245, 158, 11, 0.08); }
+.decision-banner.inconclusive .decision-status { color: var(--accent-amber); }
+.decision-banner.pending .decision-status { color: var(--text-muted); }
+
+.event-results {
+    overflow-x: auto;
+    margin-bottom: 0.75rem;
+}
+.event-results table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+}
+.event-results th, .event-results td {
+    padding: 0.3rem 0.45rem;
+    border-bottom: 1px solid var(--border-color);
+    text-align: left;
+    white-space: nowrap;
+}
+.event-results th { color: var(--text-muted); font-weight: 500; }
+.event-results td.bad { color: var(--accent-amber); }
+.event-results .checks { margin-top: 0.4rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.event-results .check-pill {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+}
+.event-results .check-pill.pass { color: var(--accent-green); border-color: rgba(16, 185, 129, 0.5); }
+.event-results .check-pill.fail { color: var(--accent-amber); border-color: rgba(245, 158, 11, 0.5); }

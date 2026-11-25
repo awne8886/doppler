@@ -34,9 +34,10 @@
                 <label for="scenarioPreset">Scenario Preset:</label>
                 <select id="scenarioPreset">
                     <option value="">-- Select Curated Flyover --</option>
-                    <option value="sfo_ual421" selected>SFO - UAL421 (Boeing 737 @ Foster City)</option>
+                    <option value="sfo_ual421">SFO - UAL421 (Boeing 737 @ Foster City)</option>
                     <option value="lhr_baw282">LHR - BAW282 (Airbus A350 @ Richmond)</option>
                     <option value="jfk_dal410">JFK - DAL410 (Airbus A321 @ Queens)</option>
+                    <option value="sfo_dual" selected>SFO - Two flyovers, shared clock (UAL1714 + SWA2286)</option>
                 </select>
             </div>
             <button id="loadPresetBtn" class="btn btn-secondary">Load Scenario</button>
@@ -72,7 +73,7 @@
                     </button>
                     <button id="stopBtn" class="btn btn-icon" title="Stop Audio">&#9632;</button>
                     <div class="audio-info">
-                        <span id="audioFileName">sfo_ual421.wav</span>
+                        <span id="audioFileName">sfo_dual.wav</span>
                         <span id="audioTimeDisplay">00:00 / 00:00</span>
                     </div>
                     <audio id="audioElement" preload="auto"></audio>
@@ -83,6 +84,9 @@
             <div class="spectrogram-card">
                 <div class="spectrogram-toolbar">
                     <div class="tool-group">
+                        <button id="autoRidgeBtn" class="btn btn-sm btn-accent" title="Automatically detect moving Doppler ridges and group harmonics">&#10022; Auto-Detect Ridges</button>
+                        <button id="newEventBtn" class="btn btn-sm" title="Start tracing a new, independent event">+ Event</button>
+                        <button id="deleteEventBtn" class="btn btn-sm" title="Delete the selected event">Del Event</button>
                         <span class="tool-label">Trace Mode:</span>
                         <button id="traceModeBtn" class="btn btn-toggle active" title="Click &amp; Drag on canvas to trace Doppler curve">Trace Curve</button>
                         <button id="snapPeakBtn" class="btn btn-toggle active" title="Snap traced points to local spectral peak">Snap Peak</button>
@@ -133,8 +137,10 @@
                         <span class="stat-label">&Delta;f Drop:</span>
                         <span id="deltaFDisplay" class="stat-val">-- Hz</span>
                     </div>
-                    <button id="autoDetectF0Btn" class="btn btn-sm btn-secondary" title="Auto-detect f0 from inflection point">Auto f&#8320;</button>
+                    <button id="autoDetectF0Btn" class="btn btn-sm btn-secondary" title="Estimate f0 from a constant-velocity flyover fit">Auto f&#8320;</button>
                 </div>
+                <div id="discoveryStatus" class="discovery-status">Click <strong>Auto-Detect Ridges</strong> to scan the whole recording, or trace manually. Use <strong>+ Event</strong> for additional flyovers.</div>
+                <div id="eventList" class="event-list"></div>
             </div>
 
             <!-- Search Area & Flight Parameters -->
@@ -159,10 +165,27 @@
                     <div class="input-field">
                         <label for="gridResInput">Grid Resolution:</label>
                         <select id="gridResInput">
-                            <option value="21">21 &times; 21 (441 points)</option>
-                            <option value="25" selected>25 &times; 25 (625 points)</option>
+                            <option value="15">15 &times; 15 (225 points)</option>
+                            <option value="21" selected>21 &times; 21 (441 points)</option>
+                            <option value="25">25 &times; 25 (625 points)</option>
                             <option value="31">31 &times; 31 (961 points)</option>
                         </select>
+                    </div>
+                    <div class="input-field">
+                        <label for="clockInput">Recording start (UTC, optional):</label>
+                        <input type="text" id="clockInput" placeholder="ISO 8601 or Unix epoch">
+                    </div>
+                    <div class="input-field">
+                        <label for="clockTolInput">Clock tolerance (&plusmn;s):</label>
+                        <input type="number" id="clockTolInput" value="2" min="0" step="0.5">
+                    </div>
+                    <div class="input-field">
+                        <label for="tempInput">Air temperature (&deg;C, optional):</label>
+                        <input type="number" id="tempInput" placeholder="20" step="0.5">
+                    </div>
+                    <div class="input-field checkbox-field">
+                        <label><input type="checkbox" id="fitF0Check" checked> Fit f&#8320; per event</label>
+                        <label><input type="checkbox" id="sensitivityCheck" checked> Sensitivity analysis</label>
                     </div>
                 </div>
 
@@ -207,10 +230,15 @@
             <div class="results-card" id="resultsCard">
                 <div class="results-header">
                     <h3>Acoustic Geolocation Telemetry</h3>
-                    <div class="score-badge" id="matchScoreBadge">
+                    <div class="score-badge" id="matchScoreBadge" title="Fit quality from the robust residual. A ranking statistic, not a probability.">
                         <span class="score-num" id="matchScoreNum">--</span>%
-                        <span class="score-lbl">MATCH CONFIDENCE</span>
+                        <span class="score-lbl">FIT SCORE</span>
                     </div>
+                </div>
+
+                <div id="decisionBanner" class="decision-banner pending">
+                    <span class="decision-status" id="decisionStatus">AWAITING ANALYSIS</span>
+                    <span class="decision-msg" id="decisionMsg">A ranked best cell is a hypothesis; evidence checks decide whether it is a supported location.</span>
                 </div>
 
                 <div class="telemetry-grid">
@@ -230,18 +258,28 @@
                         <span id="resAircraftType" class="telem-val">--</span>
                     </div>
                     <div class="telem-item">
-                        <span class="telem-label">LEAST SQUARES RESIDUAL:</span>
+                        <span class="telem-label">WORST EVENT RESIDUAL:</span>
                         <span id="resRmse" class="telem-val">-- Hz RMSE</span>
                     </div>
                     <div class="telem-item">
-                        <span class="telem-label">TIME SHIFT OFFSET:</span>
-                        <span id="resTimeShift" class="telem-val">-- s</span>
+                        <span class="telem-label">RECORDING CLOCK (UTC):</span>
+                        <span id="resTimeShift" class="telem-val">--</span>
+                    </div>
+                    <div class="telem-item">
+                        <span class="telem-label">SENSITIVITY RADIUS:</span>
+                        <span id="resUncertainty" class="telem-val">--</span>
+                    </div>
+                    <div class="telem-item">
+                        <span class="telem-label">COMPETING OPTIMA:</span>
+                        <span id="resAlternatives" class="telem-val">--</span>
                     </div>
                     <div class="telem-item">
                         <span class="telem-label">GRID CANDIDATES:</span>
                         <span id="resTotalTested" class="telem-val">-- evaluated</span>
                     </div>
                 </div>
+
+                <div id="eventResults" class="event-results"></div>
 
                 <!-- Comparison Curve Canvas -->
                 <div class="comparison-card">
@@ -272,6 +310,7 @@
     <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
     
     <script src="./js/physics_engine.js"></script>
+    <script src="./js/doppler_analysis.js"></script>
     <script src="./js/adsb_manager.js"></script>
     <script src="./js/api_client.js"></script>
     <script src="./js/audio_analyzer.js"></script>

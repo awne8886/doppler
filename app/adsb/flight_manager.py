@@ -7,13 +7,15 @@ import math
 from typing import Any, Dict, List, Optional
 import numpy as np
 
+from app.adsb.adsblol_client import AdsbLolClient
 from app.adsb.opensky_client import OpenSkyClient
 from app.adsb.sample_flights import get_curated_scenarios, generate_linear_flight_trajectory
 
 
 class FlightManager:
-    def __init__(self, opensky_client: Optional[OpenSkyClient] = None):
+    def __init__(self, opensky_client: Optional[OpenSkyClient] = None, adsblol_client: Optional[AdsbLolClient] = None):
         self.opensky = opensky_client or OpenSkyClient()
+        self.adsblol = adsblol_client or AdsbLolClient()
         self.scenarios = get_curated_scenarios()
 
     def get_curated_scenario_list(self) -> List[Dict[str, Any]]:
@@ -28,6 +30,9 @@ class FlightManager:
                 "f0_target": v["f0_target"],
                 "callsign": v["trajectory"]["callsign"],
                 "aircraft_type": v["trajectory"]["aircraft_type"],
+                "n_flights": len(v.get("flights", [v["trajectory"]])),
+                "audio_duration_sec": v.get("audio_duration_sec"),
+                "recording_start_epoch": v.get("recording_start_epoch"),
             }
             for k, v in self.scenarios.items()
         ]
@@ -50,7 +55,8 @@ class FlightManager:
         """
         # If a curated scenario matches or is explicitly requested
         if scenario_id and scenario_id in self.scenarios:
-            return [self.scenarios[scenario_id]["trajectory"]]
+            sc = self.scenarios[scenario_id]
+            return list(sc.get("flights") or [sc["trajectory"]])
 
         # Check if coordinates closely match any curated scenario (~20km)
         for s_id, s_data in self.scenarios.items():
@@ -58,7 +64,7 @@ class FlightManager:
             sc_lon = s_data["search_center"]["lon"]
             dist_km = math.hypot((center_lat - sc_lat) * 111.0, (center_lon - sc_lon) * 111.0 * math.cos(math.radians(center_lat)))
             if dist_km < 15.0:
-                return [s_data["trajectory"]]
+                return list(s_data.get("flights") or [s_data["trajectory"]])
 
         # Calculate bounding box
         deg_lat = radius_km / 111.0
@@ -70,6 +76,9 @@ class FlightManager:
 
         # Attempt query via OpenSky live/historical client
         live_states = self.opensky.get_live_states(lamin, lomin, lamax, lomax)
+        if not live_states:
+            # Fall back to the open ADSB.lol community network.
+            live_states = self.adsblol.get_live_states(center_lat, center_lon, radius_km)
         if live_states and len(live_states) > 0:
             flights = []
             for state in live_states[:5]:
@@ -88,7 +97,7 @@ class FlightManager:
                 traj = generate_linear_flight_trajectory(
                     flight_id=state["icao24"].upper(),
                     callsign=callsign,
-                    aircraft_type="Commercial Jet (ADS-B Live)",
+                    aircraft_type=state.get("aircraft_type") or "Commercial Jet (ADS-B Live)",
                     start_lat=start_lat,
                     start_lon=start_lon,
                     start_alt=alt,

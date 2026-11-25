@@ -57,6 +57,7 @@ class AudioAnalyzer {
                 this.renderSpectrogram();
                 this.renderRulers();
             }
+            if (window.tracer) window.tracer.reproject(this.maxFreq);
         });
     }
 

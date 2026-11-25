@@ -80,6 +80,52 @@ def generate_linear_flight_trajectory(
     }
 
 
+def trajectory_start_for_cpa(
+    observer: Tuple[float, float],
+    heading_deg: float,
+    speed_mps: float,
+    lateral_offset_m: float,
+    seconds_before_cpa: float,
+) -> Tuple[float, float]:
+    """
+    Start (lat, lon) of a straight track whose ground CPA lies ``lateral_offset_m``
+    to the right of the observer (negative = left) and which reaches it after
+    ``seconds_before_cpa`` seconds.
+    """
+    R_earth = 6371000.0
+    h = math.radians(heading_deg)
+    ux, uy = math.sin(h), math.cos(h)  # along-track unit vector (east, north)
+    rx, ry = uy, -ux  # right-hand normal
+    # CPA ground point sits to the left of the track when the observer is on its right.
+    cx, cy = -lateral_offset_m * rx, -lateral_offset_m * ry
+    sx = cx - ux * speed_mps * seconds_before_cpa
+    sy = cy - uy * speed_mps * seconds_before_cpa
+    lat0 = math.radians(observer[0])
+    lat = observer[0] + math.degrees(sy / R_earth)
+    lon = observer[1] + math.degrees(sx / (R_earth * math.cos(lat0)))
+    return round(lat, 6), round(lon, 6)
+
+
+def recording_start_epoch(trajectory: Dict[str, Any], observer: Tuple[float, float], audio_duration_sec: float,
+                          speed_of_sound: float = 343.2) -> float:
+    """
+    Absolute epoch of the first audio sample produced by ``synthesize_flyover_wav``
+    (which centres its window on the CPA arrival).
+    """
+    R_earth = 6371000.0
+    t = np.asarray(trajectory["timestamps"], dtype=np.float64)
+    lat = np.radians(np.asarray(trajectory["latitudes"], dtype=np.float64))
+    lon = np.radians(np.asarray(trajectory["longitudes"], dtype=np.float64))
+    alt = np.asarray(trajectory["altitudes"], dtype=np.float64)
+    la0, lo0 = math.radians(observer[0]), math.radians(observer[1])
+    x = R_earth * (lon - lo0) * np.cos((lat + la0) / 2.0)
+    y = R_earth * (lat - la0)
+    d = np.sqrt(x * x + y * y + alt * alt)
+    i = int(np.argmin(d))
+    t_obs_cpa = (t[i] - t[0]) + d[i] / speed_of_sound
+    return float(t[0] + max(0.0, t_obs_cpa - audio_duration_sec / 2.0))
+
+
 def get_curated_scenarios() -> Dict[str, Dict[str, Any]]:
     """
     Returns curated high-fidelity flight scenarios with real-world geography.
@@ -177,5 +223,55 @@ def get_curated_scenarios() -> Dict[str, Dict[str, Any]]:
             ground_truth_obs=jfk_center,
         ),
     }
+
+    # Scenario 4: Two independent flyovers sharing one recording clock (Foster City)
+    # A single straight flyover is mirror-ambiguous about its own track; a second,
+    # differently oriented flyover in the same recording resolves the ambiguity.
+    dual_center = (37.5585, -122.2711)
+    dual_epoch = 1700003600.0
+    dual_flights = [
+        generate_linear_flight_trajectory(
+            flight_id="UAL1714", callsign="UAL1714", aircraft_type="Boeing 737-900",
+            start_lat=37.509314, start_lon=-122.200289, start_alt=1250.0,
+            heading_deg=305.0, speed_mps=165.0, vertical_rate_mps=-3.0,
+            duration_sec=120.0, start_epoch=dual_epoch - 32.0, f0_target=820.0,
+            ground_truth_obs=dual_center,
+        ),
+        generate_linear_flight_trajectory(
+            flight_id="SWA2286", callsign="SWA2286", aircraft_type="Boeing 737-700",
+            start_lat=37.482178, start_lon=-122.32051, start_alt=380.0,
+            heading_deg=35.0, speed_mps=135.0, vertical_rate_mps=6.0,
+            duration_sec=120.0, start_epoch=dual_epoch - 18.0, f0_target=590.0,
+            ground_truth_obs=dual_center,
+        ),
+        generate_linear_flight_trajectory(
+            flight_id="ASA331", callsign="ASA331", aircraft_type="Airbus A320",
+            start_lat=37.662529, start_lon=-122.288682, start_alt=3000.0,
+            heading_deg=160.0, speed_mps=190.0, vertical_rate_mps=0.0,
+            duration_sec=120.0, start_epoch=dual_epoch + 90.0, f0_target=700.0,
+            ground_truth_obs=dual_center,
+        ),
+    ]
+    scenarios["sfo_dual"] = {
+        "id": "sfo_dual",
+        "name": "Foster City - Two Flyovers (UAL1714 + SWA2286)",
+        "description": "Two crossing flyovers in one 75 s recording with a shared clock; an unrelated ASA331 pass is included as a decoy.",
+        "search_center": {"lat": dual_center[0], "lon": dual_center[1]},
+        "recommended_radius_km": 8.0,
+        "f0_target": 820.0,
+        "audio_duration_sec": 75.0,
+        "recording_start_epoch": dual_epoch,
+        "trajectory": dual_flights[0],
+        "flights": dual_flights,
+    }
+
+    for sc in scenarios.values():
+        sc.setdefault("flights", [sc["trajectory"]])
+        sc.setdefault("audio_duration_sec", 25.0)
+        if "recording_start_epoch" not in sc:
+            gt = sc["trajectory"]["ground_truth_mic"]
+            sc["recording_start_epoch"] = recording_start_epoch(
+                sc["trajectory"], (gt["lat"], gt["lon"]), sc["audio_duration_sec"]
+            )
 
     return scenarios
