@@ -66,23 +66,54 @@ class ApiClient {
         const hasBackend = await this.checkBackend();
         if (hasBackend) {
             try {
-                const resp = await fetch(`${this.baseUrl}/api/geolocate`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                });
-                if (resp.ok) return await resp.json();
-                const err = await resp.json().catch(() => ({}));
-                if (resp.status >= 400 && resp.status < 500) throw new Error(err.detail || `HTTP ${resp.status}`);
+                return await this.serverGeolocate(payload, onProgress);
             } catch (e) {
-                if (e.message && !/fetch|network/i.test(e.message)) throw e;
+                if (e && e.clientError) throw new Error(e.message);
                 console.warn('Backend geolocation failed, falling back to client physics:', e);
             }
         }
         return this.clientGeolocate(payload, onProgress);
     }
 
-    /** Full joint-matching pipeline in the browser (GitHub Pages mode). */
+    /**
+     * Server geolocation via the async jobs API (progress polling), falling
+     * back to the synchronous endpoint on servers without /api/jobs.
+     */
+    async serverGeolocate(payload, onProgress) {
+        const post = (url) => fetch(`${this.baseUrl}${url}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        const fail = async (resp) => {
+            const err = await resp.json().catch(() => ({}));
+            const detail = typeof err.detail === 'string' ? err.detail : `HTTP ${resp.status}`;
+            if (resp.status >= 400 && resp.status < 500) throw { clientError: true, message: detail };
+            throw new Error(detail);
+        };
+        const sub = await post('/api/jobs/geolocate');
+        if (sub.status === 404 || sub.status === 405) {
+            const resp = await post('/api/geolocate');
+            if (!resp.ok) await fail(resp);
+            return resp.json();
+        }
+        if (!sub.ok) await fail(sub);
+        const { job_id: jobId } = await sub.json();
+        for (;;) {
+            await new Promise(r => setTimeout(r, 400));
+            const resp = await fetch(`${this.baseUrl}/api/jobs/${encodeURIComponent(jobId)}`);
+            if (!resp.ok) await fail(resp);
+            const job = await resp.json();
+            if (onProgress && job.status === 'running') onProgress(`server ${job.stage}`, job.progress);
+            if (job.status === 'done') return job.result;
+            if (job.status === 'error') {
+                const e = job.error || {};
+                if (e.status_code >= 400 && e.status_code < 500) throw { clientError: true, message: e.detail };
+                throw new Error(e.detail || 'Server geolocation failed.');
+            }
+            if (job.status === 'cancelled') throw { clientError: true, message: 'Geolocation job was cancelled.' };
+        }
+    }
+
+    /** Full joint-matching pipeline in the browser (GitHub Pages mode), in a Web Worker when possible. */
     async clientGeolocate(payload, onProgress) {
         const DA = window.DopplerAnalysis;
         const events = (payload.events && payload.events.length)
@@ -98,149 +129,54 @@ class ApiClient {
                 { demo: !!payload.demo, timeWindowStart: payload.time_window_start }
             );
         }
-        let flights = found.flights;
-        const provenance = { data_source: found.data_source, data_notes: found.notes, data_limitations: found.limitations };
-        if (!flights || flights.length === 0) {
-            return { status: 'no_adsb_data', message: found.message, mode: 'client_physics',
-                decision: DA.decideLocation({ status: 'no_adsb_data' }, {}, events.length), ...provenance };
+        const args = { payload: Object.assign({}, payload, { events }), found };
+        try {
+            return await this.runInWorker('geolocate', args, onProgress);
+        } catch (e) {
+            if (!e || !e.workerUnavailable) throw e;
+            return DA.runPipeline(args.payload, found, onProgress);
         }
-        if (payload.flight_id) {
-            const target = flights.filter(f => f.flight_id === payload.flight_id);
-            if (target.length) flights = target;
-        }
-        if (payload.qnh_hpa != null) flights = flights.map(f => DA.applyQnh(f, payload.qnh_hpa));
-        if (payload.condition_tracks !== false) {
-            flights = flights.map(f => (['historical', 'uploaded'].includes(f.data_source) ? DA.conditionTrajectory(f) : f));
-        }
-        const c = DA.speedOfSoundFor(payload.temperature_c, payload.relative_humidity_pct);
-        const [windE, windN] = DA.windVector(payload.wind_speed_mps, payload.wind_from_deg);
-        let elevation = null, elevationNote = 'flat_ground';
-        if (payload.observer_elevation_grid) {
-            elevation = DA.latLonElevation(payload.observer_elevation_grid, payload.center_lat, payload.center_lon, payload.elevation_datum_offset_m || 0);
-            elevationNote = 'user_grid';
-        } else if (payload.dem_lookup) {
-            elevationNote = 'dem_unavailable_flat_ground';
-        }
-        const opts = {
-            speed_of_sound: c,
-            fit_f0: payload.fit_f0 !== false,
-            loss_scale_hz: payload.loss_scale_hz || 2.0,
-            drift_fraction: payload.drift_fraction != null ? payload.drift_fraction : 0.02,
-            observer_alt_m: payload.observer_alt_m || 0,
-            wind_e: windE, wind_n: windN,
-            wind_uncertainty_mps: payload.wind_uncertainty_mps != null ? payload.wind_uncertainty_mps : 5.0,
-            elevation,
-        };
-        provenance.atmosphere = {
-            speed_of_sound_mps: +c.toFixed(3), wind_east_mps: +windE.toFixed(3), wind_north_mps: +windN.toFixed(3),
-            wind_speed_mps: payload.wind_speed_mps || 0, wind_from_deg: payload.wind_from_deg ?? null,
-            wind_uncertainty_mps: opts.wind_uncertainty_mps, qnh_hpa: payload.qnh_hpa ?? null, elevation: elevationNote,
-        };
-        if (!opts.fit_f0) events.forEach(e => { e.f0 = e.f0 || payload.f0; });
-        const clock = payload.recording_start_epoch != null
-            ? [payload.recording_start_epoch - (payload.clock_tolerance_s ?? 2), payload.recording_start_epoch + (payload.clock_tolerance_s ?? 2)]
-            : null;
+    }
 
-        const flyoverFits = {};
-        for (const ev of events) {
-            const pts = ev.traced_curve || [];
-            if (pts.length < 5) continue;
-            try { flyoverFits[ev.id] = DA.FlyoverFit.fit(pts.map(p => p.time), pts.map(p => p.freq), c); } catch (e) { /* skip */ }
+    /**
+     * Run analysis in a dedicated Web Worker so the UI stays responsive.
+     * Rejects with {workerUnavailable: true} when workers cannot be used
+     * (e.g. file:// pages), so callers can fall back to the main thread.
+     */
+    runInWorker(type, args, onProgress = null, transfer = []) {
+        if (this.workerBroken || typeof Worker === 'undefined') return Promise.reject({ workerUnavailable: true });
+        if (!this.worker) {
+            try {
+                this.worker = new Worker(new URL('js/analysis_worker.js', document.baseURI));
+                this.workerSeq = 0;
+                this.workerCalls = new Map();
+                this.worker.onmessage = (e) => {
+                    const { id, kind } = e.data;
+                    const call = this.workerCalls.get(id);
+                    if (!call) return;
+                    if (kind === 'progress') { if (call.onProgress) call.onProgress(e.data.stage, e.data.frac); return; }
+                    this.workerCalls.delete(id);
+                    if (kind === 'result') call.resolve(e.data.result);
+                    else call.reject(new Error(e.data.message || 'Worker error'));
+                };
+                this.worker.onerror = (err) => {
+                    console.warn('Analysis worker failed; using the main thread.', err.message || err);
+                    this.workerBroken = true;
+                    for (const call of this.workerCalls.values()) call.reject({ workerUnavailable: true });
+                    this.workerCalls.clear();
+                    try { this.worker.terminate(); } catch (e2) { /* ignore */ }
+                    this.worker = null;
+                };
+            } catch (e) {
+                this.workerBroken = true;
+                return Promise.reject({ workerUnavailable: true });
+            }
         }
-        let candidates = flights, discarded = [];
-        if (payload.prefilter !== false) {
-            ({ kept: candidates, discarded } = DA.prefilterFlights(flights, events, flyoverFits, clock, opts.observer_alt_m));
-        }
-        provenance.discarded_flights = discarded;
-        const summaries = (diags) => flights.map(f => {
-            const d = discarded.find(x => x.flight_id === f.flight_id);
-            return {
-                flight_id: f.flight_id, callsign: f.callsign, aircraft_type: f.aircraft_type,
-                data_source: f.data_source, altitude_basis: f.altitude_basis,
-                matched_events: diags.filter(x => x.flight_id === f.flight_id && x.matched).map(x => x.event_id),
-                discarded: !!d, discard_reasons: d ? d.groups : [], conditioning: f.conditioning || null,
-            };
+        const id = ++this.workerSeq;
+        return new Promise((resolve, reject) => {
+            this.workerCalls.set(id, { resolve, reject, onProgress });
+            this.worker.postMessage({ id, type, args }, transfer);
         });
-        if (!candidates.length) {
-            return { status: 'no_match', message: 'Every candidate flight was excluded by the kinematic / time pre-filter.',
-                decision: DA.decideLocation({ status: 'no_match' }, {}, events.length), flyover_fits: flyoverFits,
-                evaluated_flights: summaries([]), mode: 'client_physics', ...provenance };
-        }
-        const matcher = new DA.JointMatcher(candidates, events, payload.center_lat, payload.center_lon, opts, clock);
-        const res = await matcher.run(payload.radius_km, payload.grid_resolution || 21, {
-            sensitivity: payload.sensitivity !== false, onProgress,
-        });
-        const decision = DA.decideLocation(res, {
-            max_rmse_hz: payload.max_rmse_hz || 3.0,
-            min_independent_flyovers: payload.min_independent_flyovers || 2,
-            precision_target_m: payload.precision_target_m || 1000,
-        }, events.length);
-
-        if (res.status !== 'ok') {
-            return { status: 'no_match', message: res.message, decision, flyover_fits: flyoverFits, evaluated_flights: summaries([]), mode: 'client_physics', ...provenance };
-        }
-
-        const sigma = 3 * opts.loss_scale_hz;
-        const scoreOf = (rr) => (isFinite(rr) ? 100 * Math.exp(-0.5 * (rr / sigma) ** 2) : 0);
-        const nG = res.n_groups;
-        const heatmap = matcher.grid.cells.filter(cell => cell.inside).map(cell => {
-            const g = matcher.toGeo(cell.x, cell.y);
-            const rr = DA.robustRmse(cell.loss / nG);
-            return { lat: +g.lat.toFixed(6), lon: +g.lon.toFixed(6), score: +scoreOf(rr).toFixed(2), rmse: isFinite(rr) ? +rr.toFixed(2) : null };
-        });
-        const best = res.best;
-        const bg = matcher.toGeo(best.x, best.y);
-        const diags = res.diagnostics;
-        const primary = diags.find(d => d.matched) || diags[0];
-        const pk = matcher.models.find(m => m.flight_id === primary.flight_id) || matcher.models[0];
-        const comparison = [];
-        const eventsOut = diags.map(d => {
-            const { times = [], traced = [], modeled = [], ...rest } = d;
-            times.forEach((t, i) => comparison.push({
-                event_id: d.event_id, time: +t.toFixed(3), traced_freq: +traced[i].toFixed(2),
-                modeled_freq: modeled[i] != null ? +modeled[i].toFixed(2) : null,
-            }));
-            return rest;
-        });
-        const matchedIds = new Set(diags.filter(d => d.matched).map(d => d.flight_id));
-        return {
-            status: 'success',
-            mode: 'client_physics',
-            ...provenance,
-            best_flight: { flight_id: pk.flight_id, callsign: pk.raw.callsign, aircraft_type: pk.raw.aircraft_type, data_source: pk.raw.data_source },
-            best_location: {
-                lat: +bg.lat.toFixed(6), lon: +bg.lon.toFixed(6),
-                score: +scoreOf(res.robust_rmse_hz).toFixed(2),
-                rmse_hz: +Math.max(...diags.filter(d => d.matched).map(d => d.rmse_hz)).toFixed(3),
-                robust_rmse_hz: +res.robust_rmse_hz.toFixed(3),
-                time_offset_sec: +(best.start - pk.t[0]).toFixed(3),
-                recording_start_epoch: +best.start.toFixed(3),
-                uncertainty_radius_m: res.sensitivity ? res.sensitivity.radius_m : null,
-            },
-            decision,
-            alternatives: res.alternatives.map(a => ({
-                lat: +a.lat.toFixed(6), lon: +a.lon.toFixed(6), robust_rmse_hz: +a.robust_rmse_hz.toFixed(3),
-                distance_from_best_m: +a.distance_from_best_m.toFixed(1), recording_start_epoch: +a.start.toFixed(3),
-            })),
-            sensitivity: res.sensitivity,
-            events: eventsOut,
-            flyover_fits: flyoverFits,
-            heatmap,
-            curve_comparison: comparison,
-            flight_trajectory: {
-                flight_id: pk.flight_id, callsign: pk.raw.callsign, aircraft_type: pk.raw.aircraft_type,
-                data_source: pk.raw.data_source, latitudes: pk.raw.latitudes, longitudes: pk.raw.longitudes, altitudes: pk.raw.altitudes, speeds: pk.raw.speeds,
-            },
-            matched_flights: matcher.models.filter(m => matchedIds.has(m.flight_id)).map(m => ({
-                flight_id: m.flight_id, callsign: m.raw.callsign, aircraft_type: m.raw.aircraft_type,
-                data_source: m.raw.data_source, latitudes: m.raw.latitudes, longitudes: m.raw.longitudes,
-            })),
-            f0_hz: primary.f0_hz,
-            evaluated_flights: summaries(diags),
-            grid_resolution: payload.grid_resolution || 21,
-            speed_of_sound_mps: c,
-            clock_mode: clock ? 'trusted_window' : 'free',
-        };
     }
 
     /**
@@ -262,7 +198,8 @@ class ApiClient {
             }
         }
         if (!audioBuffer) throw new Error('No decoded audio available for discovery.');
-        return window.DopplerAnalysis.RidgeDiscovery.discover(audioBuffer, settings);
+        return window.DopplerAnalysis.RidgeDiscovery.discover(audioBuffer, settings,
+            (type, args, onProgress, transfer) => this.runInWorker(type, args, onProgress, transfer));
     }
 
     /**

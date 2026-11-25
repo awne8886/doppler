@@ -391,7 +391,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (qnh !== '') payload.qnh_hpa = parseFloat(qnh);
 
             const result = await window.apiClient.geolocateObserver(payload, (stage, frac) => {
-                loadingMessage.textContent = `Client physics: ${stage} ${Math.round(frac * 100)}%`;
+                loadingMessage.textContent = `Matching (${stage}): ${Math.round(frac * 100)}%`;
             });
             displayGeolocationResults(result);
         } catch (err) {

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,7 @@ from app.adsb.track_import import ImportOptions, TrackImportError, parse_tracks,
 from app.audio.discovery import DiscoverySettings, discover_file
 from app.audio.metadata import read_recording_start
 from app.config import Settings
+from app.jobs import JobStore
 from app.physics.confidence import DecisionPolicy, decide_location
 from app.physics.doppler_engine import DopplerEngine
 from app.physics.flyover_fit import fit_flyover, kinematic_consistency
@@ -101,6 +102,7 @@ opensky_client = OpenSkyClient()
 flight_manager = FlightManager(opensky_client, historical_providers=build_providers(settings.cache_dir),
                                max_live_aircraft=settings.max_live_aircraft)
 CONDITIONED_SOURCES = ("historical", "uploaded")
+jobs = JobStore(max_workers=settings.max_jobs, ttl_s=settings.job_ttl_s)
 
 
 class CurvePoint(BaseModel):
@@ -156,6 +158,8 @@ class GeolocateRequest(BaseModel):
     max_rmse_hz: float = Field(3.0, gt=0.0, description="Decision threshold for per-event RMSE")
     min_independent_flyovers: int = Field(2, ge=1, le=10)
     precision_target_m: float = Field(1000.0, gt=0.0)
+    grid_strategy: Optional[str] = Field(
+        None, description="'full' or 'coarse_to_fine'; default: coarse_to_fine for grids >= 31, else full")
 
 
 class FlightSearchRequest(BaseModel):
@@ -387,6 +391,62 @@ def geolocate(req: GeolocateRequest):
     return run_geolocation(req)
 
 
+@app.post("/api/jobs/geolocate", status_code=202)
+def submit_geolocate_job(req: GeolocateRequest):
+    """
+    Queue a geolocation job (same request and result schema as ``/api/geolocate``).
+    Poll ``GET /api/jobs/{job_id}`` or stream ``GET /api/jobs/{job_id}/events``.
+    """
+    _collect_events(req)  # validate synchronously so bad requests fail fast with 400
+    jid = jobs.submit(lambda progress: run_geolocation(req, progress))
+    return {"job_id": jid, "status": "queued", "poll_url": f"/api/jobs/{jid}", "events_url": f"/api/jobs/{jid}/events"}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired.")
+    return job
+
+
+@app.delete("/api/jobs/{job_id}")
+def cancel_job(job_id: str):
+    if not jobs.cancel(job_id):
+        raise HTTPException(status_code=404, detail="Job not found or expired.")
+    return jobs.get(job_id, include_result=False)
+
+
+@app.get("/api/jobs/{job_id}/events")
+async def job_events(job_id: str):
+    """Server-Sent Events: ``progress`` events while running, then one ``done``/``error``/``cancelled`` event."""
+    import asyncio
+    import json as _json
+
+    if jobs.get(job_id, include_result=False) is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired.")
+
+    async def stream():
+        last = None
+        while True:
+            job = jobs.get(job_id, include_result=False)
+            if job is None:
+                yield "event: error\ndata: {\"detail\": \"Job expired.\"}\n\n"
+                return
+            snap = (job["status"], job["stage"], job["progress"])
+            if snap != last:
+                last = snap
+                kind = job["status"] if job["status"] in ("done", "error", "cancelled") else "progress"
+                body = {k: job[k] for k in ("job_id", "status", "stage", "progress", "error")}
+                yield f"event: {kind}\ndata: {_json.dumps(body)}\n\n"
+                if kind != "progress":
+                    return
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
     """Full geolocation pipeline shared by the synchronous endpoint and async jobs."""
     raw_events = _collect_events(req)
@@ -437,10 +497,15 @@ def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
                 "evaluated_flights": _flight_summaries(flights, [], flyover_fits, discarded), **provenance}
 
     wind_e, wind_n = wind_vector(req.wind_speed_mps, req.wind_from_deg)
+    grid_res = req.grid_resolution or 25
+    strategy = req.grid_strategy or ("coarse_to_fine" if grid_res >= 31 else "full")
+    if strategy not in ("full", "coarse_to_fine"):
+        raise HTTPException(status_code=400, detail="grid_strategy must be 'full' or 'coarse_to_fine'.")
     opts = MatchOptions(
         speed_of_sound=c, fit_f0=req.fit_f0, drift_fraction=req.drift_fraction,
         loss_scale_hz=req.loss_scale_hz, observer_alt_m=req.observer_alt_m,
         wind_e=wind_e, wind_n=wind_n, wind_uncertainty_mps=req.wind_uncertainty_mps, elevation=elevation,
+        workers=settings.workers, grid_strategy=strategy,
     )
     provenance["atmosphere"] = {
         "speed_of_sound_mps": round(c, 3), "wind_east_mps": round(wind_e, 3), "wind_north_mps": round(wind_n, 3),
@@ -449,8 +514,8 @@ def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
     }
     try:
         matcher = JointMatcher(candidates, raw_events, req.center_lat, req.center_lon, opts, clock_window)
-        res = matcher.run(req.radius_km, req.grid_resolution or 25, sensitivity=req.sensitivity,
-                          precision_target_m=req.precision_target_m)
+        res = matcher.run(req.radius_km, grid_res, sensitivity=req.sensitivity,
+                          precision_target_m=req.precision_target_m, progress=progress)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -560,11 +625,14 @@ def _format_result(matcher: JointMatcher, res, decision, flights, flyover_fits, 
                 continue
             lat, lon = matcher.to_geo(float(G["X"][iy, ix]), float(G["Y"][iy, ix]))
             rr = robust_rmse(G["loss"][iy, ix] / n_groups)
-            heatmap.append({
+            cell = {
                 "lat": round(lat, 6), "lon": round(lon, 6),
                 "score": round(score_of(rr), 2),
                 "rmse": round(rr, 2) if math.isfinite(rr) else None,
-            })
+            }
+            if "evaluated" in G and not G["evaluated"][iy, ix]:
+                cell["interpolated"] = True
+            heatmap.append(cell)
 
     best = res["best"]
     lat, lon = matcher.to_geo(best["x"], best["y"])
@@ -629,6 +697,7 @@ def _format_result(matcher: JointMatcher, res, decision, flights, flyover_fits, 
         "f0_hz": primary.get("f0_hz"),
         "evaluated_flights": _flight_summaries(flights, diags, flyover_fits, discarded),
         "grid_resolution": int(G["X"].shape[0]),
+        "grid_strategy": G.get("strategy", "full"),
         "speed_of_sound_mps": opts.speed_of_sound,
         "clock_mode": "trusted_window" if matcher.clock_window else "free",
     }

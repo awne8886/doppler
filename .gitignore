@@ -8,3 +8,4 @@ htmlcov/
 var/
 node_modules/
 .ruff_cache/
+*.log

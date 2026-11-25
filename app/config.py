@@ -17,6 +17,9 @@ DOPPLER_CORS_ORIGINS       Comma-separated allowed CORS origins. ``*`` (default)
 DOPPLER_CARTO_KEY          Optional CARTO basemap key served to the frontend via
                            ``/js/config.js`` (restrict it by HTTP referrer).
 DOPPLER_MAX_LIVE_AIRCRAFT  Live-snapshot aircraft kept, nearest first (default 8).
+DOPPLER_WORKERS            Matcher worker processes (default min(4, CPUs); 1 = serial).
+DOPPLER_MAX_JOBS           Concurrent async geolocation jobs (default 2).
+DOPPLER_JOB_TTL_S          Finished jobs are forgotten after this many seconds (default 3600).
 =========================  =======================================================
 """
 
@@ -44,6 +47,9 @@ class Settings:
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
     carto_key: str = ""
     max_live_aircraft: int = 8
+    workers: int = 1
+    max_jobs: int = 2
+    job_ttl_s: float = 3600.0
 
     @property
     def upload_dir(self) -> str:
@@ -64,4 +70,7 @@ class Settings:
             cors_origins=origins,
             carto_key=os.environ.get("DOPPLER_CARTO_KEY", ""),
             max_live_aircraft=int(_env_float("DOPPLER_MAX_LIVE_AIRCRAFT", 8)),
+            workers=max(1, int(_env_float("DOPPLER_WORKERS", max(1, min(4, os.cpu_count() or 1))))),
+            max_jobs=max(1, int(_env_float("DOPPLER_MAX_JOBS", 2))),
+            job_ttl_s=_env_float("DOPPLER_JOB_TTL_S", 3600.0),
         )

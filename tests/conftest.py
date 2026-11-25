@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 _DATA_DIR = tempfile.mkdtemp(prefix="doppler-test-")
 os.environ.setdefault("DOPPLER_DATA_DIR", _DATA_DIR)
+os.environ.setdefault("DOPPLER_WORKERS", "1")  # tests run the matcher serially unless they opt in
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
