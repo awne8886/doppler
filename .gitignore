@@ -5,5 +5,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
-app/static/uploads/*
-!app/static/uploads/.gitkeep
+var/
+node_modules/
+.ruff_cache/
+*.log

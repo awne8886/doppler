@@ -5,7 +5,8 @@ and theoretical observed Doppler frequency curves.
 """
 
 import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Tuple, Union
+
 import numpy as np
 
 
@@ -19,11 +20,39 @@ class DopplerEngine:
         self.R = float(earth_radius)
 
     @staticmethod
-    def calculate_speed_of_sound(temp_celsius: float = 20.0, relative_humidity: float = 0.5) -> float:
-        """Calculate approximate speed of sound as a function of temperature."""
-        t_kelvin = temp_celsius + 273.15
-        # Standard ideal gas approximation in dry/temperate air
-        return 331.3 * math.sqrt(t_kelvin / 273.15)
+    def calculate_speed_of_sound(temp_celsius: float = 20.0, relative_humidity: float = 0.5,
+                                 pressure_pa: float = 101325.0, co2_mole_fraction: float = 0.0004) -> float:
+        """
+        Speed of sound in humid air (Cramer 1993, J. Acoust. Soc. Am. 93, 2510).
+
+        :param temp_celsius: air temperature [degC]
+        :param relative_humidity: relative humidity as a fraction 0..1 (values > 1 are read as percent)
+        :param pressure_pa: static pressure [Pa]
+        :param co2_mole_fraction: CO2 mole fraction (0.0004 ~ present-day air)
+
+        Water-vapour mole fraction uses the Davis (1992) saturation vapour
+        pressure and enhancement factor, as in Cramer's paper.  Accurate to
+        ~0.1 m/s for 0-30 degC; outside that range it remains a smooth
+        approximation.
+        """
+        h = float(relative_humidity)
+        if h > 1.0:
+            h /= 100.0
+        h = min(max(h, 0.0), 1.0)
+        t = float(temp_celsius)
+        T = t + 273.15
+        p = float(pressure_pa)
+        p_sv = math.exp(1.2811805e-5 * T * T - 1.9509874e-2 * T + 34.04926034 - 6.3536311e3 / T)
+        f_enh = 1.00062 + 3.14e-8 * p + 5.6e-7 * t * t
+        x_w = h * f_enh * p_sv / p
+        x_c = float(co2_mole_fraction)
+        a = (331.5024, 0.603055, -0.000528, 51.471935, 0.1495874, -0.000782, -1.82e-7, 3.73e-8, -2.93e-10,
+             -85.20931, -0.228525, 5.91e-5, -2.835149, -2.15e-13, 29.179762, 0.000486)
+        return (a[0] + a[1] * t + a[2] * t * t
+                + (a[3] + a[4] * t + a[5] * t * t) * x_w
+                + (a[6] + a[7] * t + a[8] * t * t) * p
+                + (a[9] + a[10] * t + a[11] * t * t) * x_c
+                + a[12] * x_w * x_w + a[13] * p * p + a[14] * x_c * x_c + a[15] * x_w * p * x_c)
 
     def geodetic_to_cartesian(
         self,
@@ -80,7 +109,7 @@ class DopplerEngine:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute slant distance and radial velocity of the aircraft relative to observer.
-        
+
         :param plane_pos: (N, 3) Cartesian positions of plane [x, y, z] in meters
         :param plane_vel: (N, 3) Cartesian velocity vectors of plane [vx, vy, vz] in m/s
         :param obs_pos: (3,) Cartesian position of candidate observer [x, y, z] in meters

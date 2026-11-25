@@ -2,6 +2,9 @@
  * Leaflet.js Mapping & Acoustic Heatmap Visualization Engine.
  * Renders spatial heatmaps, flight trajectories, and comparison curves.
  */
+const esc = (v) => window.DopplerUtil.escapeHtml(v);
+const num = (v, d = 0) => window.DopplerUtil.fmtNum(v, d);
+
 class MapView {
     constructor() {
         this.map = null;
@@ -19,11 +22,13 @@ class MapView {
     }
 
     initMap() {
-        const cartoKey = 'cb1_53g1_1_fd641ece496f7c5c49a5afbe';
+        // Configurable key (js/config.js or the server's DOPPLER_CARTO_KEY); omitted when empty.
+        const cartoKey = (window.DOPPLER_CONFIG && window.DOPPLER_CONFIG.cartoKey) || '';
+        const keyParam = cartoKey ? `?key=${encodeURIComponent(cartoKey)}` : '';
 
         // 1. CARTO Voyager (Default with User API Key)
         const cartoVoyager = L.tileLayer(
-            `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=${cartoKey}`,
+            `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png${keyParam}`,
             {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
                 subdomains: 'abcd',
@@ -33,7 +38,7 @@ class MapView {
 
         // 2. CARTO Dark Matter (with User API Key)
         const cartoDark = L.tileLayer(
-            `https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png?key=${cartoKey}`,
+            `https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png${keyParam}`,
             {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
                 subdomains: 'abcd',
@@ -43,7 +48,7 @@ class MapView {
 
         // 3. CARTO Positron (with User API Key)
         const cartoPositron = L.tileLayer(
-            `https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=${cartoKey}`,
+            `https://{s}.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png${keyParam}`,
             {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
                 subdomains: 'abcd',
@@ -70,6 +75,7 @@ class MapView {
         this.gridMarkersLayer = L.layerGroup().addTo(this.map);
         this.flightLayer = L.layerGroup().addTo(this.map);
         this.altLayer = L.layerGroup().addTo(this.map);
+        this.ambiguityLayer = L.layerGroup().addTo(this.map);
 
         // Map click updates search center if user clicks holding Alt or Shift
         this.map.on('click', (e) => {
@@ -154,10 +160,10 @@ class MapView {
             circle.bindPopup(`
                 <div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
                     <strong>Candidate Acoustic Observer</strong><br>
-                    <strong>Coords:</strong> ${pt.lat.toFixed(5)}, ${pt.lon.toFixed(5)}<br>
-                    <strong>Fit Score:</strong> <span style="color:#d97706; font-weight:bold;">${pt.score}%</span><br>
-                    <strong>Robust RMSE:</strong> ${pt.rmse} Hz<br>
-                    <strong>Matched Flight:</strong> ${flightInfo.callsign || flightInfo.flight_id}
+                    <strong>Coords:</strong> ${num(pt.lat, 5)}, ${num(pt.lon, 5)}<br>
+                    <strong>Fit Score:</strong> <span style="color:#d97706; font-weight:bold;">${num(pt.score, 2)}%</span><br>
+                    <strong>Robust RMSE:</strong> ${num(pt.rmse, 2)} Hz<br>
+                    <strong>Matched Flight:</strong> ${esc(flightInfo.callsign || flightInfo.flight_id)}
                 </div>
             `);
             this.gridMarkersLayer.addLayer(circle);
@@ -173,9 +179,9 @@ class MapView {
             }).bindPopup(`
                 <div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
                     <strong>${tie ? 'Near-tied alternative' : 'Competing local optimum'}</strong><br>
-                    ${alt.lat.toFixed(5)}, ${alt.lon.toFixed(5)}<br>
-                    Robust RMSE: ${alt.robust_rmse_hz} Hz<br>
-                    ${(alt.distance_from_best_m / 1000).toFixed(2)} km from best
+                    ${num(alt.lat, 5)}, ${num(alt.lon, 5)}<br>
+                    Robust RMSE: ${num(alt.robust_rmse_hz, 3)} Hz<br>
+                    ${num(alt.distance_from_best_m / 1000, 2)} km from best
                 </div>`).addTo(this.altLayer);
         }
         if (bestLocation && bestLocation.uncertainty_radius_m) {
@@ -183,7 +189,7 @@ class MapView {
                 radius: Math.max(10, bestLocation.uncertainty_radius_m),
                 color: decision && decision.status === 'supported' ? '#10b981' : '#f59e0b',
                 weight: 1.5, dashArray: '4,4', fillOpacity: 0.08,
-            }).bindTooltip(`Sensitivity radius ${Math.round(bestLocation.uncertainty_radius_m)} m (engineering envelope, uncalibrated)`).addTo(this.altLayer);
+            }).bindTooltip(`Sensitivity radius ${num(bestLocation.uncertainty_radius_m)} m (engineering envelope, uncalibrated)`).addTo(this.altLayer);
         }
 
         // 4. Mark Hottest Point (Estimated microphone location)
@@ -222,14 +228,38 @@ class MapView {
                 .bindPopup(`
                     <div style="font-family:'Space Grotesk', sans-serif; font-size:13px; color:#111;">
                         <h4 style="color:#e11d48; margin-bottom:4px;">&#127908; ${decision && decision.status === 'supported' ? 'SUPPORTED MICROPHONE LOCATION' : 'BEST-RANKED HYPOTHESIS (INCONCLUSIVE)'}</h4>
-                        <strong>Coords:</strong> ${bestLocation.lat.toFixed(6)}, ${bestLocation.lon.toFixed(6)}<br>
-                        <strong>Fit Score:</strong> ${bestLocation.score}%<br>
-                        <strong>Worst Event RMSE:</strong> ${bestLocation.rmse_hz} Hz<br>
-                        <strong>Matched Flight:</strong> ${flightInfo.callsign || flightInfo.flight_id} (${flightInfo.aircraft_type})
+                        <strong>Coords:</strong> ${num(bestLocation.lat, 6)}, ${num(bestLocation.lon, 6)}<br>
+                        <strong>Fit Score:</strong> ${num(bestLocation.score, 2)}%<br>
+                        <strong>Worst Event RMSE:</strong> ${num(bestLocation.rmse_hz, 3)} Hz<br>
+                        <strong>Matched Flight:</strong> ${esc(flightInfo.callsign || flightInfo.flight_id)} (${esc(flightInfo.aircraft_type || 'unknown type')})
                     </div>
                 `)
                 .openPopup();
         }
+    }
+
+    /** Single-flyover mirror ambiguity: mirror point, connecting line and (free clock) along-track ridges. */
+    displayAmbiguity(best, amb, freeClock) {
+        this.ambiguityLayer.clearLayers();
+        L.circleMarker([amb.mirror.lat, amb.mirror.lon], { radius: 9, color: '#f59e0b', weight: 2, dashArray: '3,3', fillOpacity: 0.1 })
+            .bindPopup(`<div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
+                <strong>Mirror ambiguity</strong><br>${num(amb.mirror.lat, 5)}, ${num(amb.mirror.lon, 5)}<br>
+                ${num(amb.distance_m / 1000, 2)} km from the best point, across the flight track.<br>
+                One straight flyover sounds the same on both sides of its track.</div>`)
+            .addTo(this.ambiguityLayer);
+        L.polyline([[best.lat, best.lon], [amb.mirror.lat, amb.mirror.lon]], { color: '#f59e0b', weight: 1.5, dashArray: '2,6' })
+            .addTo(this.ambiguityLayer);
+        if (freeClock) {
+            for (const ridge of amb.ridges) {
+                L.polyline(ridge.map(p => [p.lat, p.lon]), { color: '#f59e0b', weight: 6, opacity: 0.25 })
+                    .bindTooltip('Ambiguity ridge: with a free recording clock the observer can also slide along the track.')
+                    .addTo(this.ambiguityLayer);
+            }
+        }
+    }
+
+    clearAmbiguity() {
+        if (this.ambiguityLayer) this.ambiguityLayer.clearLayers();
     }
 
     displayFlightTrajectories(trajectories) {
@@ -239,6 +269,7 @@ class MapView {
     }
 
     displayFlightTrajectory(trajectory, color = '#f59e0b', clear = true) {
+        color = /^#[0-9a-fA-F]{3,8}$/.test(color) ? color : '#f59e0b';
         if (clear) this.flightLayer.clearLayers();
         if (!trajectory || !trajectory.latitudes || trajectory.latitudes.length === 0) return;
 
@@ -281,10 +312,12 @@ class MapView {
         const planeMarker = L.marker(endPoint, { icon: planeIcon }).addTo(this.flightLayer);
         planeMarker.bindPopup(`
             <div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
-                <strong>${trajectory.callsign || trajectory.flight_id}</strong><br>
-                ${trajectory.aircraft_type || 'Aircraft'}<br>
-                <strong>Speed:</strong> ${trajectory.speeds ? trajectory.speeds[0] : 170} m/s<br>
-                <strong>Altitude:</strong> ${trajectory.altitudes ? trajectory.altitudes[0] : 1200} m
+                <strong>${esc(trajectory.callsign || trajectory.flight_id)}</strong><br>
+                ${esc(trajectory.aircraft_type || 'Aircraft')}<br>
+                <strong>Speed:</strong> ${trajectory.speeds && trajectory.speeds.length ? `${num(trajectory.speeds[0])} m/s` : 'not reported'}<br>
+                <strong>Altitude:</strong> ${trajectory.altitudes && trajectory.altitudes.length ? `${num(trajectory.altitudes[0])} m` : 'not reported'}
+                ${trajectory.altitude_basis ? `(${esc(trajectory.altitude_basis)})` : ''}<br>
+                <strong>Source:</strong> ${esc(trajectory.data_source || 'unknown')}
             </div>
         `);
     }

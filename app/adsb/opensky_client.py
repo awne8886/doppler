@@ -1,105 +1,100 @@
 """
-OpenSky Network ADS-B API integration client.
-Supports querying live state vectors and historical flight tracks,
-with robust error handling and authentication support.
+OpenSky Network REST client (live state vectors).
+
+Parsing rules (honesty first):
+
+* Geometric (GNSS) altitude is preferred over barometric altitude because the
+  Doppler geometry needs a true height; the chosen basis is recorded in
+  ``altitude_basis``.
+* Aircraft reported ``on_ground`` are dropped.
+* States missing position, ground speed, track, altitude or position time are
+  skipped instead of being filled with invented defaults.  A missing vertical
+  rate is taken as level flight and flagged with ``vertical_rate_reported``.
+
+Authentication: OpenSky now only accepts OAuth2 client credentials (basic
+auth was retired).  See :mod:`app.adsb.providers` for the token handling used
+by the historical provider; this live client accepts an optional token
+callable with the same semantics.
 """
 
 import logging
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
 import requests
 
 logger = logging.getLogger("doppler.opensky")
+
+USER_AGENT = "DopplerAcousticGeolocator/1.2"
 
 
 class OpenSkyClient:
     BASE_URL = "https://opensky-network.org/api"
 
-    def __init__(self, username: Optional[str] = None, password: Optional[str] = None, timeout: int = 10):
-        self.username = username
-        self.password = password
+    def __init__(self, token_provider: Optional[Callable[[], Optional[str]]] = None, timeout: int = 10):
+        self.token_provider = token_provider
         self.timeout = timeout
-        self.auth = (username, password) if username and password else None
 
-    def get_live_states(
-        self,
-        lamin: float,
-        lomin: float,
-        lamax: float,
-        lomax: float,
-    ) -> Optional[List[Dict[str, Any]]]:
-        """
-        Fetch live aircraft states within a bounding box.
-        
-        OpenSky state vector index:
-        0: icao24, 1: callsign, 2: origin_country, 3: time_position, 4: last_contact,
-        5: longitude, 6: latitude, 7: baro_altitude, 8: on_ground, 9: velocity (m/s),
-        10: true_track (deg), 11: vertical_rate (m/s), 12: sensors, 13: geo_altitude,
-        14: squawk, 15: spi, 16: position_source
-        """
-        endpoint = f"{self.BASE_URL}/states/all"
-        params = {
-            "lamin": lamin,
-            "lomin": lomin,
-            "lamax": lamax,
-            "lomax": lomax,
-        }
+    def _headers(self) -> Dict[str, str]:
+        headers = {"User-Agent": USER_AGENT}
+        token = self.token_provider() if self.token_provider else None
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
+    def get_live_states(self, lamin: float, lomin: float, lamax: float, lomax: float) -> Optional[List[Dict[str, Any]]]:
+        """Fetch live aircraft states within a bounding box. ``None`` on any failure."""
+        params = {"lamin": lamin, "lomin": lomin, "lamax": lamax, "lomax": lomax}
         try:
-            resp = requests.get(
-                endpoint,
-                params=params,
-                auth=self.auth,
-                timeout=self.timeout,
-                headers={"User-Agent": "DopplerAcousticGeolocator/1.0"},
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                states = data.get("states")
-                if not states:
-                    return []
-                results = []
-                for s in states:
-                    if s[5] is not None and s[6] is not None:
-                        results.append({
-                            "icao24": s[0],
-                            "callsign": (s[1] or "").strip(),
-                            "country": s[2],
-                            "time_position": s[3],
-                            "lon": float(s[5]),
-                            "lat": float(s[6]),
-                            "altitude": float(s[7] or s[13] or 1000.0),
-                            "velocity": float(s[9] or 150.0),
-                            "heading": float(s[10] or 0.0),
-                            "vertical_rate": float(s[11] or 0.0),
-                            "on_ground": bool(s[8]),
-                        })
-                return results
-            else:
-                logger.warning(f"OpenSky API returned status {resp.status_code}: {resp.text[:120]}")
+            resp = requests.get(f"{self.BASE_URL}/states/all", params=params, timeout=self.timeout, headers=self._headers())
+            if resp.status_code != 200:
+                logger.warning("OpenSky API returned status %s", resp.status_code)
                 return None
-        except Exception as e:
-            logger.warning(f"Failed to query OpenSky API: {e}")
+            return self.parse_states(resp.json())
+        except Exception as e:  # network errors are non-fatal
+            logger.warning("Failed to query OpenSky API: %s", e)
             return None
 
-    def get_track_by_icao(self, icao24: str, epoch_time: int) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def parse_states(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Fetch historical flight track for a specific aircraft icao24 at given timestamp.
-        """
-        endpoint = f"{self.BASE_URL}/tracks/all"
-        params = {"icao24": icao24.lower().strip(), "time": epoch_time}
+        Convert an OpenSky ``/states/all`` payload into SI state dicts.
 
-        try:
-            resp = requests.get(
-                endpoint,
-                params=params,
-                auth=self.auth,
-                timeout=self.timeout,
-                headers={"User-Agent": "DopplerAcousticGeolocator/1.0"},
-            )
-            if resp.status_code == 200:
-                return resp.json()
-            return None
-        except Exception as e:
-            logger.warning(f"OpenSky track fetch error for {icao24}: {e}")
-            return None
+        State vector index: 0 icao24, 1 callsign, 2 origin_country, 3 time_position,
+        4 last_contact, 5 longitude, 6 latitude, 7 baro_altitude [m], 8 on_ground,
+        9 velocity [m/s over ground], 10 true_track [deg], 11 vertical_rate [m/s],
+        12 sensors, 13 geo_altitude [m], 14 squawk, 15 spi, 16 position_source.
+        """
+        results = []
+        for s in (payload or {}).get("states") or []:
+            if not isinstance(s, (list, tuple)) or len(s) < 14:
+                continue
+            lon, lat = s[5], s[6]
+            if lat is None or lon is None or s[3] is None:
+                continue
+            if s[8]:  # on_ground
+                continue
+            if s[9] is None or s[10] is None:
+                continue
+            if s[13] is not None:
+                alt, basis = float(s[13]), "geometric"
+            elif s[7] is not None:
+                alt, basis = float(s[7]), "barometric"
+            else:
+                continue
+            results.append({
+                "icao24": str(s[0]).lower(),
+                "callsign": (s[1] or "").strip(),
+                "country": s[2],
+                "time_position": float(s[3]),
+                "lon": float(lon),
+                "lat": float(lat),
+                "altitude": alt,
+                "altitude_basis": basis,
+                "velocity": float(s[9]),
+                "heading": float(s[10]),
+                "vertical_rate": float(s[11]) if s[11] is not None else 0.0,
+                "vertical_rate_reported": s[11] is not None,
+                "on_ground": False,
+                "source": "opensky",
+            })
+        return results

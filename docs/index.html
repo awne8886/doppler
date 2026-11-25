@@ -92,6 +92,9 @@
                         <button id="snapPeakBtn" class="btn btn-toggle active" title="Snap traced points to local spectral peak">Snap Peak</button>
                         <button id="undoTraceBtn" class="btn btn-sm">Undo</button>
                         <button id="clearTraceBtn" class="btn btn-sm btn-danger">Clear</button>
+                        <button id="saveSessionBtn" class="btn btn-sm" title="Save traced events and settings as JSON">Save session</button>
+                        <button id="loadSessionBtn" class="btn btn-sm" title="Load a saved trace session">Load session</button>
+                        <input type="file" id="sessionFileInput" accept=".json,application/json" class="file-input-hidden">
                     </div>
                     <div class="tool-group">
                         <label for="colormapSelect">Palette:</label>
@@ -166,14 +169,15 @@
                         <label for="gridResInput">Grid Resolution:</label>
                         <select id="gridResInput">
                             <option value="15">15 &times; 15 (225 points)</option>
-                            <option value="21" selected>21 &times; 21 (441 points)</option>
-                            <option value="25">25 &times; 25 (625 points)</option>
+                            <option value="21">21 &times; 21 (441 points)</option>
+                            <option value="25" selected>25 &times; 25 (625 points)</option>
                             <option value="31">31 &times; 31 (961 points)</option>
                         </select>
                     </div>
                     <div class="input-field">
                         <label for="clockInput">Recording start (UTC, optional):</label>
                         <input type="text" id="clockInput" placeholder="ISO 8601 or Unix epoch">
+                        <span id="clockNote" class="field-note"></span>
                     </div>
                     <div class="input-field">
                         <label for="clockTolInput">Clock tolerance (&plusmn;s):</label>
@@ -183,9 +187,60 @@
                         <label for="tempInput">Air temperature (&deg;C, optional):</label>
                         <input type="number" id="tempInput" placeholder="20" step="0.5">
                     </div>
+                    <div class="input-field">
+                        <label for="humidityInput">Relative humidity (%, optional):</label>
+                        <input type="number" id="humidityInput" placeholder="50" min="0" max="100" step="1">
+                    </div>
+                    <div class="input-field">
+                        <label for="windSpeedInput">Wind speed (m/s, optional):</label>
+                        <input type="number" id="windSpeedInput" placeholder="0" min="0" max="60" step="0.5">
+                    </div>
+                    <div class="input-field">
+                        <label for="windFromInput">Wind from (&deg; true):</label>
+                        <input type="number" id="windFromInput" placeholder="270" min="0" max="360" step="5">
+                    </div>
+                    <div class="input-field">
+                        <label for="qnhInput">QNH (hPa, for barometric tracks):</label>
+                        <input type="number" id="qnhInput" placeholder="1013.25" min="870" max="1090" step="0.5">
+                    </div>
                     <div class="input-field checkbox-field">
                         <label><input type="checkbox" id="fitF0Check" checked> Fit f&#8320; per event</label>
                         <label><input type="checkbox" id="sensitivityCheck" checked> Sensitivity analysis</label>
+                        <label title="Without this, only real ADS-B data (live, historical or uploaded tracks) is used. Demo data cannot locate a real recording."><input type="checkbox" id="demoCheck"> Allow demo / synthetic flights</label>
+                    </div>
+                </div>
+
+                <div class="tracks-box">
+                    <h4>Real ADS-B tracks for this recording</h4>
+                    <p class="small-text">Live data only covers the last couple of minutes. For an older recording, import the
+                        aircraft tracks (CSV, FlightRadar24 CSV, KML, GeoJSON or readsb/tar1090 trace JSON), or give icao24
+                        hex codes for the server's historical provider.</p>
+                    <div class="params-grid">
+                        <div class="input-field">
+                            <label for="trackFileInput">Track file(s):</label>
+                            <input type="file" id="trackFileInput" multiple accept=".csv,.kml,.geojson,.json,.gz,.txt">
+                        </div>
+                        <div class="input-field">
+                            <label for="trackAltUnit">Altitude unit (if not in header):</label>
+                            <select id="trackAltUnit">
+                                <option value="auto" selected>auto (from header/format)</option>
+                                <option value="ft">feet</option>
+                                <option value="m">metres</option>
+                            </select>
+                        </div>
+                        <div class="input-field">
+                            <label for="trackTz">Time zone for times without offset:</label>
+                            <input type="text" id="trackTz" placeholder="e.g. UTC or +02:00">
+                        </div>
+                        <div class="input-field">
+                            <label for="icaoHintsInput">icao24 hints (historical, optional):</label>
+                            <input type="text" id="icaoHintsInput" placeholder="a1b2c3, 4ca7f2">
+                        </div>
+                    </div>
+                    <div class="action-row compact">
+                        <button id="importTracksBtn" class="btn btn-sm btn-secondary">Import tracks</button>
+                        <button id="clearTracksBtn" class="btn btn-sm">Clear imported</button>
+                        <span id="trackStatus" class="small-text">No tracks imported.</span>
                     </div>
                 </div>
 
@@ -307,9 +362,12 @@
 
     <!-- Scripts (Relative paths for GitHub Pages) -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-    
-    <script src="./js/physics_engine.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" integrity="sha384-mFKkGiGvT5vo1fEyGCD3hshDdKmW3wzXW/x+fWriYJArD0R3gawT6lMvLboM22c0" crossorigin=""></script>
+
+    <script src="./js/config.js"></script>
+    <script src="./js/util.js"></script>
+    <script src="./js/track_import.js"></script>
+    <script src="./js/results.js"></script>
     <script src="./js/doppler_analysis.js"></script>
     <script src="./js/adsb_manager.js"></script>
     <script src="./js/api_client.js"></script>

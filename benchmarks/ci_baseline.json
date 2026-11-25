@@ -1,0 +1,32 @@
+{
+ "runs": 6,
+ "seed": 7,
+ "config": {
+  "radius_km": 8.0,
+  "grid": 11,
+  "offset_km": 3.0,
+  "duration_s": 60.0,
+  "min_flyovers": 1,
+  "max_flyovers": 2,
+  "max_decoys": 1,
+  "noise_hz": [
+   0.2,
+   2.0
+  ],
+  "outlier_fraction": 0.03,
+  "outlier_run_fraction": 0.5,
+  "max_wind_mps": 10.0,
+  "trusted_clock_fraction": 0.5,
+  "clock_error_s": 0.3,
+  "clock_tolerance_s": 2.0,
+  "precision_target_m": 1000.0,
+  "grid_strategy": "full"
+ },
+ "supported": 1,
+ "false_supported": 0,
+ "false_support_rate": 0.0,
+ "with_location": 6,
+ "seeds_supported": [
+  700026
+ ]
+}

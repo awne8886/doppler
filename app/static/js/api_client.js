@@ -53,144 +53,130 @@ class ApiClient {
             }
         }
 
-        // Client-side flight retrieval
-        const flights = window.clientFlights.fetchOrGenerateFlights(
-            params.center_lat,
-            params.center_lon,
-            params.radius_km,
-            params.scenario_id
+        // Client-side flight retrieval (demo data only when explicitly requested)
+        const found = window.clientFlights.findFlights(
+            params.center_lat, params.center_lon, params.radius_km, params.scenario_id,
+            { demo: !!params.demo, timeWindowStart: params.time_window_start }
         );
-        return { count: flights.length, flights };
+        return { count: found.flights.length, flights: found.flights, status: found.status,
+            data_source: found.data_source, notes: found.notes, limitations: found.limitations };
     }
 
     async geolocateObserver(payload, onProgress = null) {
         const hasBackend = await this.checkBackend();
         if (hasBackend) {
             try {
-                const resp = await fetch(`${this.baseUrl}/api/geolocate`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                });
-                if (resp.ok) return await resp.json();
-                const err = await resp.json().catch(() => ({}));
-                if (resp.status >= 400 && resp.status < 500) throw new Error(err.detail || `HTTP ${resp.status}`);
+                return await this.serverGeolocate(payload, onProgress);
             } catch (e) {
-                if (e.message && !/fetch|network/i.test(e.message)) throw e;
+                if (e && e.clientError) throw new Error(e.message);
                 console.warn('Backend geolocation failed, falling back to client physics:', e);
             }
         }
         return this.clientGeolocate(payload, onProgress);
     }
 
-    /** Full joint-matching pipeline in the browser (GitHub Pages mode). */
+    /**
+     * Server geolocation via the async jobs API (progress polling), falling
+     * back to the synchronous endpoint on servers without /api/jobs.
+     */
+    async serverGeolocate(payload, onProgress) {
+        const post = (url) => fetch(`${this.baseUrl}${url}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        const fail = async (resp) => {
+            const err = await resp.json().catch(() => ({}));
+            const detail = typeof err.detail === 'string' ? err.detail : `HTTP ${resp.status}`;
+            if (resp.status >= 400 && resp.status < 500) throw { clientError: true, message: detail };
+            throw new Error(detail);
+        };
+        const sub = await post('/api/jobs/geolocate');
+        if (sub.status === 404 || sub.status === 405) {
+            const resp = await post('/api/geolocate');
+            if (!resp.ok) await fail(resp);
+            return resp.json();
+        }
+        if (!sub.ok) await fail(sub);
+        const { job_id: jobId } = await sub.json();
+        for (;;) {
+            await new Promise(r => setTimeout(r, 400));
+            const resp = await fetch(`${this.baseUrl}/api/jobs/${encodeURIComponent(jobId)}`);
+            if (!resp.ok) await fail(resp);
+            const job = await resp.json();
+            if (onProgress && job.status === 'running') onProgress(`server ${job.stage}`, job.progress);
+            if (job.status === 'done') return job.result;
+            if (job.status === 'error') {
+                const e = job.error || {};
+                if (e.status_code >= 400 && e.status_code < 500) throw { clientError: true, message: e.detail };
+                throw new Error(e.detail || 'Server geolocation failed.');
+            }
+            if (job.status === 'cancelled') throw { clientError: true, message: 'Geolocation job was cancelled.' };
+        }
+    }
+
+    /** Full joint-matching pipeline in the browser (GitHub Pages mode), in a Web Worker when possible. */
     async clientGeolocate(payload, onProgress) {
         const DA = window.DopplerAnalysis;
-        const flights = window.clientFlights.fetchOrGenerateFlights(
-            payload.center_lat, payload.center_lon, payload.radius_km, payload.scenario_id
-        );
-        if (!flights || flights.length === 0) throw new Error('No flight trajectory found.');
-
         const events = (payload.events && payload.events.length)
             ? payload.events
             : [{ id: 'E1', traced_curve: payload.traced_curve, f0: payload.f0 }];
-        const c = payload.temperature_c != null
-            ? 331.3 * Math.sqrt((payload.temperature_c + 273.15) / 273.15) : 343.2;
-        const opts = {
-            speed_of_sound: c,
-            fit_f0: payload.fit_f0 !== false,
-            loss_scale_hz: payload.loss_scale_hz || 2.0,
-            drift_fraction: payload.drift_fraction != null ? payload.drift_fraction : 0.02,
-            observer_alt_m: payload.observer_alt_m || 0,
-        };
-        if (!opts.fit_f0) events.forEach(e => { e.f0 = e.f0 || payload.f0; });
-        const clock = payload.recording_start_epoch != null
-            ? [payload.recording_start_epoch - (payload.clock_tolerance_s ?? 2), payload.recording_start_epoch + (payload.clock_tolerance_s ?? 2)]
-            : null;
-
-        const matcher = new DA.JointMatcher(flights, events, payload.center_lat, payload.center_lon, opts, clock);
-        const res = await matcher.run(payload.radius_km, payload.grid_resolution || 21, {
-            sensitivity: payload.sensitivity !== false, onProgress,
-        });
-        const decision = DA.decideLocation(res, {
-            max_rmse_hz: payload.max_rmse_hz || 3.0,
-            min_independent_flyovers: payload.min_independent_flyovers || 2,
-            precision_target_m: payload.precision_target_m || 1000,
-        }, events.length);
-
-        const flyoverFits = {};
-        for (const ev of events) {
-            const pts = ev.traced_curve || [];
-            if (pts.length < 5) continue;
-            try { flyoverFits[ev.id] = DA.FlyoverFit.fit(pts.map(p => p.time), pts.map(p => p.freq), c); } catch (e) { /* skip */ }
+        let found;
+        if (payload.trajectories && payload.trajectories.length) {
+            found = { status: 'ok', data_source: 'uploaded', notes: [`${payload.trajectories.length} uploaded track(s) supplied with the request.`], limitations: [],
+                flights: payload.trajectories.map(t => Object.assign({}, t, { data_source: 'uploaded' })) };
+        } else {
+            found = window.clientFlights.findFlights(
+                payload.center_lat, payload.center_lon, payload.radius_km, payload.scenario_id,
+                { demo: !!payload.demo, timeWindowStart: payload.time_window_start }
+            );
         }
-        if (res.status !== 'ok') {
-            return { status: 'no_match', message: res.message, decision, flyover_fits: flyoverFits, mode: 'client_physics' };
+        const args = { payload: Object.assign({}, payload, { events }), found };
+        try {
+            return await this.runInWorker('geolocate', args, onProgress);
+        } catch (e) {
+            if (!e || !e.workerUnavailable) throw e;
+            return DA.runPipeline(args.payload, found, onProgress);
         }
+    }
 
-        const sigma = 3 * opts.loss_scale_hz;
-        const scoreOf = (rr) => (isFinite(rr) ? 100 * Math.exp(-0.5 * (rr / sigma) ** 2) : 0);
-        const nG = res.n_groups;
-        const heatmap = matcher.grid.cells.filter(cell => cell.inside).map(cell => {
-            const g = matcher.toGeo(cell.x, cell.y);
-            const rr = DA.robustRmse(cell.loss / nG);
-            return { lat: +g.lat.toFixed(6), lon: +g.lon.toFixed(6), score: +scoreOf(rr).toFixed(2), rmse: isFinite(rr) ? +rr.toFixed(2) : null };
+    /**
+     * Run analysis in a dedicated Web Worker so the UI stays responsive.
+     * Rejects with {workerUnavailable: true} when workers cannot be used
+     * (e.g. file:// pages), so callers can fall back to the main thread.
+     */
+    runInWorker(type, args, onProgress = null, transfer = []) {
+        if (this.workerBroken || typeof Worker === 'undefined') return Promise.reject({ workerUnavailable: true });
+        if (!this.worker) {
+            try {
+                this.worker = new Worker(new URL('js/analysis_worker.js', document.baseURI));
+                this.workerSeq = 0;
+                this.workerCalls = new Map();
+                this.worker.onmessage = (e) => {
+                    const { id, kind } = e.data;
+                    const call = this.workerCalls.get(id);
+                    if (!call) return;
+                    if (kind === 'progress') { if (call.onProgress) call.onProgress(e.data.stage, e.data.frac); return; }
+                    this.workerCalls.delete(id);
+                    if (kind === 'result') call.resolve(e.data.result);
+                    else call.reject(new Error(e.data.message || 'Worker error'));
+                };
+                this.worker.onerror = (err) => {
+                    console.warn('Analysis worker failed; using the main thread.', err.message || err);
+                    this.workerBroken = true;
+                    for (const call of this.workerCalls.values()) call.reject({ workerUnavailable: true });
+                    this.workerCalls.clear();
+                    try { this.worker.terminate(); } catch (e2) { /* ignore */ }
+                    this.worker = null;
+                };
+            } catch (e) {
+                this.workerBroken = true;
+                return Promise.reject({ workerUnavailable: true });
+            }
+        }
+        const id = ++this.workerSeq;
+        return new Promise((resolve, reject) => {
+            this.workerCalls.set(id, { resolve, reject, onProgress });
+            this.worker.postMessage({ id, type, args }, transfer);
         });
-        const best = res.best;
-        const bg = matcher.toGeo(best.x, best.y);
-        const diags = res.diagnostics;
-        const primary = diags.find(d => d.matched) || diags[0];
-        const pk = matcher.models.find(m => m.flight_id === primary.flight_id) || matcher.models[0];
-        const comparison = [];
-        const eventsOut = diags.map(d => {
-            const { times = [], traced = [], modeled = [], ...rest } = d;
-            times.forEach((t, i) => comparison.push({
-                event_id: d.event_id, time: +t.toFixed(3), traced_freq: +traced[i].toFixed(2),
-                modeled_freq: modeled[i] != null ? +modeled[i].toFixed(2) : null,
-            }));
-            return rest;
-        });
-        const matchedIds = new Set(diags.filter(d => d.matched).map(d => d.flight_id));
-        return {
-            status: 'success',
-            mode: 'client_physics',
-            best_flight: { flight_id: pk.flight_id, callsign: pk.raw.callsign, aircraft_type: pk.raw.aircraft_type },
-            best_location: {
-                lat: +bg.lat.toFixed(6), lon: +bg.lon.toFixed(6),
-                score: +scoreOf(res.robust_rmse_hz).toFixed(2),
-                rmse_hz: +Math.max(...diags.filter(d => d.matched).map(d => d.rmse_hz)).toFixed(3),
-                robust_rmse_hz: +res.robust_rmse_hz.toFixed(3),
-                time_offset_sec: +(best.start - pk.t[0]).toFixed(3),
-                recording_start_epoch: +best.start.toFixed(3),
-                uncertainty_radius_m: res.sensitivity ? res.sensitivity.radius_m : null,
-            },
-            decision,
-            alternatives: res.alternatives.map(a => ({
-                lat: +a.lat.toFixed(6), lon: +a.lon.toFixed(6), robust_rmse_hz: +a.robust_rmse_hz.toFixed(3),
-                distance_from_best_m: +a.distance_from_best_m.toFixed(1), recording_start_epoch: +a.start.toFixed(3),
-            })),
-            sensitivity: res.sensitivity,
-            events: eventsOut,
-            flyover_fits: flyoverFits,
-            heatmap,
-            curve_comparison: comparison,
-            flight_trajectory: {
-                flight_id: pk.flight_id, callsign: pk.raw.callsign, aircraft_type: pk.raw.aircraft_type,
-                latitudes: pk.raw.latitudes, longitudes: pk.raw.longitudes, altitudes: pk.raw.altitudes, speeds: pk.raw.speeds,
-            },
-            matched_flights: matcher.models.filter(m => matchedIds.has(m.flight_id)).map(m => ({
-                flight_id: m.flight_id, callsign: m.raw.callsign, aircraft_type: m.raw.aircraft_type,
-                latitudes: m.raw.latitudes, longitudes: m.raw.longitudes,
-            })),
-            f0_hz: primary.f0_hz,
-            evaluated_flights: flights.map(f => ({
-                flight_id: f.flight_id, callsign: f.callsign, aircraft_type: f.aircraft_type,
-                matched_events: diags.filter(d => d.flight_id === f.flight_id && d.matched).map(d => d.event_id),
-            })),
-            grid_resolution: payload.grid_resolution || 21,
-            speed_of_sound_mps: c,
-            clock_mode: clock ? 'trusted_window' : 'free',
-        };
     }
 
     /**
@@ -212,7 +198,27 @@ class ApiClient {
             }
         }
         if (!audioBuffer) throw new Error('No decoded audio available for discovery.');
-        return window.DopplerAnalysis.RidgeDiscovery.discover(audioBuffer, settings);
+        return window.DopplerAnalysis.RidgeDiscovery.discover(audioBuffer, settings,
+            (type, args, onProgress, transfer) => this.runInWorker(type, args, onProgress, transfer));
+    }
+
+    /**
+     * Import aircraft tracks (CSV / FR24 CSV / KML / GeoJSON / readsb trace).
+     * Uses the server when available, otherwise parses in the browser.
+     */
+    async importTracks(file, options = {}) {
+        const hasBackend = await this.checkBackend();
+        if (hasBackend) {
+            const form = new FormData();
+            form.append('file', file);
+            for (const [k, v] of Object.entries(options)) if (v != null && v !== '') form.append(k, v);
+            const resp = await fetch(`${this.baseUrl}/api/flights/import`, { method: 'POST', body: form });
+            const body = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+            return Object.assign(body, { mode: 'server' });
+        }
+        const res = await window.TrackImport.parseTrackFile(file, options.format || null, options);
+        return Object.assign(res, { mode: 'client' });
     }
 
     async uploadAudio(file) {
@@ -230,7 +236,13 @@ class ApiClient {
                 // Client-side fallback handled by FileReader
             }
         }
-        return { filename: file.name, url: URL.createObjectURL(file) };
+        let meta = null;
+        if (/\.wav$/i.test(file.name || '')) {
+            try { meta = window.DopplerUtil.readWavStart(await file.arrayBuffer()); } catch (e) { meta = null; }
+        }
+        return { filename: file.name, url: URL.createObjectURL(file),
+            recording_metadata: meta || { start_epoch: null, source: null, timezone_known: false, requires_confirmation: true,
+                notes: ['No recording start time found in the file metadata (the browser reads Broadcast-WAV bext/iXML only).'] } };
     }
 }
 
