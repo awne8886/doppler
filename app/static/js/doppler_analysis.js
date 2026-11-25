@@ -1156,6 +1156,26 @@
         return v.length ? median(v) : null;
     }
 
+    /** Diagnostic kinematic comparison of a flyover fit with a trajectory (mirrors flyover_fit.kinematic_consistency). */
+    function kinematicConsistency(fit, traj, observerAltM = 0) {
+        const speeds = (traj.speeds || []).filter(v => v != null);
+        const alts = (traj.altitudes || []).filter(v => v != null);
+        const vFit = +fit.speed_mps, dFit = +fit.cpa_slant_m;
+        const unc = fit.uncertainty || {};
+        const vTol = Math.max(25, 3 * (unc.speed_mps || 0), 0.2 * vFit);
+        const dTol = Math.max(500, 3 * (unc.cpa_slant_m || 0), 0.5 * dFit);
+        const vFlight = speeds.length ? median(speeds) : NaN;
+        const minH = alts.length ? Math.min(...alts) - observerAltM : NaN;
+        const speedOk = Number.isFinite(vFlight) && Math.abs(vFlight - vFit) <= vTol;
+        const heightOk = Number.isFinite(minH) && minH <= dFit + dTol;
+        return {
+            flight_speed_mps: Number.isFinite(vFlight) ? +vFlight.toFixed(1) : null, fitted_speed_mps: +vFit.toFixed(1),
+            speed_tolerance_mps: +vTol.toFixed(1), min_height_above_observer_m: Number.isFinite(minH) ? +minH.toFixed(1) : null,
+            fitted_cpa_slant_m: +dFit.toFixed(1), slant_tolerance_m: +dTol.toFixed(1),
+            speed_compatible: speedOk, height_compatible: heightOk, compatible: speedOk && heightOk,
+        };
+    }
+
     function prefilterFlights(flights, rawEvents, flyoverFits, clockWindow = null, observerAltM = 0) {
         const spans = new Map();
         rawEvents.forEach((ev, i) => {
@@ -1350,6 +1370,7 @@
                 data_source: f.data_source, altitude_basis: f.altitude_basis,
                 matched_events: diags.filter(x => x.flight_id === f.flight_id && x.matched).map(x => x.event_id),
                 discarded: !!d, discard_reasons: d ? d.groups : [], conditioning: f.conditioning || null,
+                kinematic_consistency: Object.fromEntries(Object.entries(flyoverFits).map(([eid, fit]) => [eid, kinematicConsistency(fit, f, opts.observer_alt_m)])),
             };
         });
         if (!candidates.length) {
@@ -1439,6 +1460,6 @@
         FlyoverFit, RidgeDiscovery, JointMatcher, TrajectoryModel, GeoEngine, decideLocation, robustRmse, nelderMead,
         fitEventAt, speedOfSound, speedOfSoundFor, DEFAULT_MATCH, DEFAULT_POLICY, REASONS,
         conditionTrajectory, localQuadratic, prefilterFlights, fitIsReliable, flightGroundSpeed, PREFILTER,
-        propagation, windVector, qnhAltitude, applyQnh, latLonElevation, runPipeline, DEFAULT_DISCOVERY,
+        propagation, windVector, qnhAltitude, applyQnh, latLonElevation, runPipeline, DEFAULT_DISCOVERY, kinematicConsistency,
     };
 })(typeof window !== 'undefined' ? window : globalThis);

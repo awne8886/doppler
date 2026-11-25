@@ -956,3 +956,43 @@ select:focus, input:focus {
 .tracks-box h4 { margin: 0 0 6px; font-size: 0.85rem; letter-spacing: 0.04em; }
 .action-row.compact { margin-top: 8px; gap: 10px; align-items: center; flex-wrap: wrap; }
 .field-note { display: block; font-size: 0.72rem; color: #fbbf24; margin-top: 4px; min-height: 0; }
+
+/* ---- Touch tracing (Pointer Events) ---- */
+#traceCanvas { touch-action: none; }
+
+/* ---- Toasts (replace alert()) ---- */
+.toast-host {
+    position: fixed; right: 16px; bottom: 16px; z-index: 10000;
+    display: flex; flex-direction: column; gap: 8px; max-width: min(420px, calc(100vw - 32px));
+}
+.toast {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 10px 12px; border-radius: 8px; font-size: 0.82rem; line-height: 1.35;
+    background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-left: 4px solid #38bdf8;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.toast.warn { border-left-color: #f59e0b; }
+.toast.error { border-left-color: #ef4444; }
+.toast.ok { border-left-color: #10b981; }
+.toast .toast-msg { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+.toast button { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 1rem; line-height: 1; }
+
+/* ---- Data-source badges ---- */
+.src-badge {
+    display: inline-block; padding: 1px 6px; margin-left: 4px; border-radius: 4px;
+    font-size: 0.66rem; font-weight: 700; letter-spacing: 0.05em; vertical-align: middle;
+    border: 1px solid currentColor;
+}
+.src-badge.demo { color: #f59e0b; }
+.src-badge.live { color: #22d3ee; }
+.src-badge.historical { color: #a78bfa; }
+.src-badge.uploaded { color: #34d399; }
+.src-badge.unknown { color: #94a3b8; }
+
+/* ---- Candidate flights table & result actions ---- */
+.flight-table { margin-top: 10px; }
+.flight-table td.reasons { font-size: 0.72rem; color: #fca5a5; }
+.flight-table .kin-ok { color: #34d399; }
+.flight-table .kin-bad { color: #f87171; }
+.result-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 0; }
+.data-notes { font-size: 0.72rem; color: #94a3b8; margin-top: 6px; }

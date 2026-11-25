@@ -28,6 +28,7 @@ class DopplerTracer {
 
         this.isTracing = false;
         this.isMouseDown = false;
+        this.activePointer = null;
         this.snapToPeak = true;
 
         this.initEventListeners();
@@ -114,6 +115,27 @@ class DopplerTracer {
         this.renderEventList();
     }
 
+    /** Restore events from a saved trace session (points re-projected onto the current spectrogram). */
+    loadSessionEvents(events) {
+        this.events = [];
+        this.active = -1;
+        events.forEach((e, i) => {
+            const ev = this.newEvent({
+                id: e.id, group_id: e.group_id, include: e.include,
+                color: this.palette[i % this.palette.length], meta: e.meta,
+            });
+            ev.points = e.points.map(p => {
+                const pos = this.duration ? this.timeFreqToCanvas(p.time, p.freq) : { x: 0, y: 0 };
+                return { time: p.time, freq: p.freq, x: pos.x, y: pos.y };
+            });
+        });
+        if (!this.events.length) this.newEvent();
+        this.active = 0;
+        this.renderTrace();
+        this.updateStats();
+        this.renderEventList();
+    }
+
     /** Events (with >= 3 points) selected for geolocation. */
     getEvents() {
         return this.events
@@ -160,10 +182,28 @@ class DopplerTracer {
     initEventListeners() {
         const canvas = this.traceCanvas;
 
-        canvas.addEventListener('mousemove', (e) => this.onMouseMove(e));
-        canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
-        window.addEventListener('mouseup', () => this.onMouseUp());
-        canvas.addEventListener('mouseleave', () => this.onMouseLeave());
+        // Pointer Events: one code path for mouse, touch and pen. The canvas has
+        // `touch-action: none` (CSS) so a finger drag traces instead of scrolling.
+        canvas.addEventListener('pointerdown', (e) => {
+            if (e.pointerType === 'mouse' && e.button !== 0) return;
+            e.preventDefault();
+            try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* capture is best-effort */ }
+            this.activePointer = e.pointerId;
+            this.onMouseDown(e);
+        });
+        canvas.addEventListener('pointermove', (e) => {
+            if (this.activePointer != null && e.pointerId !== this.activePointer) return;
+            this.onMouseMove(e);
+        });
+        const end = (e) => {
+            if (this.activePointer == null || e.pointerId !== this.activePointer) return;
+            this.activePointer = null;
+            try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+            this.onMouseUp();
+        };
+        canvas.addEventListener('pointerup', end);
+        canvas.addEventListener('pointercancel', end);
+        canvas.addEventListener('pointerleave', (e) => { if (this.activePointer == null) this.onMouseLeave(e); });
 
         // Buttons
         document.getElementById('snapPeakBtn').addEventListener('click', (e) => {

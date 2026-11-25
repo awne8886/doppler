@@ -2,7 +2,13 @@
  * Main Application Controller for Doppler Acoustic Aircraft Geolocator
  */
 document.addEventListener('DOMContentLoaded', async () => {
-    const { escapeHtml, fmtNum } = window.DopplerUtil;
+    const { escapeHtml, fmtNum, toast, downloadFile } = window.DopplerUtil;
+    const RT = window.ResultTools;
+    let lastResult = null;
+    const badge = (ds) => {
+        const info = RT.sourceInfo(ds);
+        return `<span class="src-badge ${info.kind}" title="${escapeHtml(info.title)}">${escapeHtml(info.label)}</span>`;
+    };
     const playBtn = document.getElementById('playBtn');
     const playIcon = document.getElementById('playIcon');
     const stopBtn = document.getElementById('stopBtn');
@@ -111,7 +117,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // traces manually; no synthetic trace is ever substituted.
             await runAutoDetect(true);
         } catch (err) {
-            alert(`Error loading scenario: ${err.message}`);
+            toast(`Error loading scenario: ${err.message}`, 'error');
         } finally {
             hideLoading();
         }
@@ -119,7 +125,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     async function runAutoDetect(quiet = false) {
         if (!window.audioAnalyzer.audioBuffer) {
-            if (!quiet) alert('Load an audio recording first.');
+            if (!quiet) toast('Load an audio recording first.', 'warn');
             return false;
         }
         const wasHidden = loadingOverlay.classList.contains('hidden');
@@ -236,7 +242,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             discoveryStatus.classList.remove('warn');
             discoveryStatus.innerHTML = 'Audio loaded. Click <strong>Auto-Detect Ridges</strong> or trace manually.';
         } catch (err) {
-            alert(`Failed to load audio: ${err.message}`);
+            toast(`Failed to load audio: ${err.message}`, 'error');
         } finally {
             hideLoading();
         }
@@ -255,10 +261,56 @@ document.addEventListener('DOMContentLoaded', async () => {
         clockNote.textContent = `Prefilled from ${meta.source} (${tz}). Confirm before relying on it. ${(meta.notes || [])[0] || ''}`;
     }
 
+    // 4a. Settings + trace sessions
+    const SETTING_IDS = ['centerLat', 'centerLon', 'searchRadius', 'gridResInput', 'clockInput', 'clockTolInput', 'tempInput',
+        'humidityInput', 'windSpeedInput', 'windFromInput', 'qnhInput', 'icaoHintsInput', 'f0Input'];
+    const SETTING_CHECKS = ['fitF0Check', 'sensitivityCheck', 'demoCheck'];
+    function collectSettings() {
+        const out = {};
+        for (const id of SETTING_IDS) out[id] = document.getElementById(id).value;
+        for (const id of SETTING_CHECKS) out[id] = document.getElementById(id).checked;
+        out.scenario_id = currentScenarioId;
+        return out;
+    }
+    function applySettings(st) {
+        for (const id of SETTING_IDS) if (st[id] != null) document.getElementById(id).value = String(st[id]);
+        for (const id of SETTING_CHECKS) if (st[id] != null) document.getElementById(id).checked = !!st[id];
+        radiusDisplay.textContent = `${searchRadius.value} km`;
+        const lat = parseFloat(document.getElementById('centerLat').value), lon = parseFloat(document.getElementById('centerLon').value);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) window.mapView.updateSearchRadiusCircle(lat, lon, parseFloat(searchRadius.value));
+    }
+    document.getElementById('saveSessionBtn').addEventListener('click', () => {
+        const session = RT.sessionToJSON(window.tracer.events.filter(e => e.points.length), collectSettings(), {
+            audio: { filename: document.getElementById('audioFileName').textContent, duration_s: window.audioAnalyzer.duration || null },
+            tracks: importedTracks,
+        });
+        downloadFile(`doppler-session-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, session);
+    });
+    const sessionInput = document.getElementById('sessionFileInput');
+    document.getElementById('loadSessionBtn').addEventListener('click', () => sessionInput.click());
+    sessionInput.addEventListener('change', async () => {
+        const file = sessionInput.files && sessionInput.files[0];
+        sessionInput.value = '';
+        if (!file) return;
+        try {
+            const session = RT.parseSession(JSON.parse(await file.text()));
+            applySettings(session.settings);
+            if (session.settings.scenario_id !== undefined) currentScenarioId = session.settings.scenario_id;
+            window.tracer.loadSessionEvents(session.events);
+            importedTracks = session.tracks || [];
+            trackStatus.textContent = importedTracks.length ? `${importedTracks.length} uploaded track(s) restored from the session.` : 'No tracks imported.';
+            if (importedTracks.length) window.mapView.displayFlightTrajectories(importedTracks);
+            const audioNote = session.audio && session.audio.filename ? ` Recorded against "${session.audio.filename}" - load the same audio to see it on the spectrogram.` : '';
+            toast(`Session loaded: ${session.events.length} event(s).${audioNote}`, 'ok', 9000);
+        } catch (err) {
+            toast(`Could not load session: ${err.message}`, 'error');
+        }
+    });
+
     // 4b. Real-track import
     document.getElementById('importTracksBtn').addEventListener('click', async () => {
         const files = [...document.getElementById('trackFileInput').files];
-        if (!files.length) { alert('Choose one or more track files first.'); return; }
+        if (!files.length) { toast('Choose one or more track files first.', 'warn'); return; }
         const options = {
             altitude_unit: document.getElementById('trackAltUnit').value,
             timezone: document.getElementById('trackTz').value.trim() || null,
@@ -274,6 +326,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             window.mapView.displayFlightTrajectories(importedTracks);
             trackStatus.textContent = `${importedTracks.length} uploaded track(s) will be used instead of live/demo ADS-B.`
                 + (warnings.length ? ` Warnings: ${warnings.join(' ')}` : '');
+            toast(`Imported ${importedTracks.length} track(s).`, warnings.length ? 'warn' : 'ok');
         } catch (err) {
             trackStatus.textContent = `Import failed: ${err.message}`;
         } finally {
@@ -319,14 +372,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (resp && resp.flights && resp.flights.length > 0) {
                 window.mapView.displayFlightTrajectories(resp.flights);
                 document.getElementById('mapOverlayBadge').innerHTML = `
-                    <span class="status-dot"></span> Found ${fmtNum(resp.count)} flight(s) in sector
-                    (${escapeHtml(resp.data_source || 'unknown source')})
+                    <span class="status-dot"></span> Found ${fmtNum(resp.count)} flight(s) in sector ${badge(resp.data_source)}
                 `;
+                if (resp.limitations && resp.limitations.length) toast(resp.limitations.join(' '), 'info', 10000);
             } else {
-                alert((resp && resp.notes && resp.notes.length) ? resp.notes[resp.notes.length - 1] : 'No flight trajectories found in this sector.');
+                toast((resp && resp.notes && resp.notes.length) ? resp.notes[resp.notes.length - 1] : 'No flight trajectories found in this sector.', 'warn', 12000);
             }
         } catch (e) {
-            alert(`Flight query error: ${e.message}`);
+            toast(`Flight query error: ${e.message}`, 'error');
         } finally {
             hideLoading();
         }
@@ -336,17 +389,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     geolocateBtn.addEventListener('click', async () => {
         const events = window.tracer.getEvents();
         if (events.length === 0) {
-            alert('Trace or auto-detect at least one Doppler event (3+ points) and make sure it is ticked.');
+            toast('Trace or auto-detect at least one Doppler event (3+ points) and make sure it is ticked.', 'warn');
             return;
         }
         const fitF0 = document.getElementById('fitF0Check').checked;
         const f0 = parseFloat(document.getElementById('f0Input').value);
         if (!fitF0 && (!f0 || f0 <= 0)) {
-            alert('Please specify a valid fundamental frequency f0, or enable "Fit f0 per event".');
+            toast('Please specify a valid fundamental frequency f0, or enable "Fit f0 per event".', 'warn');
             return;
         }
         let clock = null;
-        try { clock = parseClock(clockInput.value); } catch (e) { alert(e.message); return; }
+        try { clock = parseClock(clockInput.value); } catch (e) { toast(e.message, 'warn'); return; }
         const tempVal = document.getElementById('tempInput').value;
         const humidityVal = document.getElementById('humidityInput').value;
 
@@ -395,7 +448,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             displayGeolocationResults(result);
         } catch (err) {
-            alert(`Geolocation error: ${err.message}`);
+            toast(`Geolocation error: ${err.message}`, 'error', 12000);
         } finally {
             hideLoading();
         }
@@ -431,18 +484,55 @@ document.addEventListener('DOMContentLoaded', async () => {
         }).join('');
         const checks = ((result.decision && result.decision.checks) || []).map(c =>
             `<span class="check-pill ${c.passed ? 'pass' : 'fail'}">${c.passed ? '\u2713' : '\u2717'} ${escapeHtml(String(c.check).replace(/_/g, ' '))}</span>`).join('');
+        const flights = (result.evaluated_flights || []).map(f => {
+            const kin = Object.entries(f.kinematic_consistency || {}).map(([eid, k]) =>
+                `<span class="${k.compatible ? 'kin-ok' : 'kin-bad'}" title="fitted ${fmtNum(k.fitted_speed_mps)} m/s vs flight ${fmtNum(k.flight_speed_mps)} m/s; CPA slant ${fmtNum(k.fitted_cpa_slant_m)} m vs min height ${fmtNum(k.min_height_above_observer_m)} m">${escapeHtml(eid)} ${k.compatible ? '\u2713' : '\u2717'}</span>`).join(' ');
+            const reasons = (f.discard_reasons || []).map(g => `${escapeHtml(g.group_id)}: ${g.reasons.map(r => escapeHtml(String(r.reason).replace(/_/g, ' '))).join(', ')}`).join('; ');
+            return `<tr>
+                <td>${escapeHtml(f.callsign || f.flight_id)} ${badge(f.data_source)}</td>
+                <td>${escapeHtml(f.altitude_basis || 'unknown')}</td>
+                <td>${(f.matched_events || []).map(escapeHtml).join(', ') || '--'}</td>
+                <td>${kin || '--'}</td>
+                <td class="${f.discarded ? 'reasons' : ''}">${f.discarded ? `discarded (${reasons})` : 'kept'}</td>
+            </tr>`;
+        }).join('');
+        const notes = [...(result.data_limitations || []), ...((result.data_notes || []).slice(-2))]
+            .map(n => `<div>${escapeHtml(n)}</div>`).join('');
         host.innerHTML = `
             <table>
                 <thead><tr><th>Event</th><th>Group</th><th>Flight</th><th>f&#8320; Hz</th><th>RMSE Hz</th><th>Outliers</th><th>Support</th><th>Drift</th><th>Flyover fit</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
-            <div class="checks">${checks}</div>`;
+            <div class="checks">${checks}</div>
+            <table class="flight-table">
+                <thead><tr><th>Candidate flight</th><th>Altitude</th><th>Matched</th><th>Kinematics (fit vs ADS-B)</th><th>Pre-filter</th></tr></thead>
+                <tbody>${flights}</tbody>
+            </table>
+            <div class="data-notes">${notes}</div>
+            <div class="result-actions">
+                <button id="exportJsonBtn" class="btn btn-sm">Export JSON</button>
+                <button id="exportGeojsonBtn" class="btn btn-sm">Export GeoJSON</button>
+            </div>`;
+        document.getElementById('exportJsonBtn').addEventListener('click', () => exportResult('json'));
+        document.getElementById('exportGeojsonBtn').addEventListener('click', () => exportResult('geojson'));
+    }
+
+    function exportResult(kind) {
+        if (!lastResult) { toast('Run a geolocation first.', 'warn'); return; }
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        if (kind === 'geojson') downloadFile(`doppler-result-${stamp}.geojson`, RT.toGeoJSON(lastResult), 'application/geo+json');
+        else downloadFile(`doppler-result-${stamp}.json`, RT.toExportJSON(lastResult, { settings: collectSettings() }));
     }
 
     function displayGeolocationResults(result) {
+        lastResult = result;
         if (result.status !== 'success') {
             displayDecision(result.decision);
-            document.getElementById('eventResults').innerHTML = `<p class="small-text">${escapeHtml(result.message || 'No match.')}</p>`;
+            const discarded = (result.discarded_flights || []).map(d => `${escapeHtml(d.callsign || d.flight_id)} (${d.groups.map(g => g.reasons.map(r => escapeHtml(r.reason)).join(', ')).join('; ')})`).join(', ');
+            document.getElementById('eventResults').innerHTML = `<p class="small-text">${escapeHtml(result.message || 'No match.')}</p>`
+                + (discarded ? `<p class="small-text">Discarded by the pre-filter: ${discarded}</p>` : '');
+            window.mapView.clearAmbiguity();
+            if (result.status === 'no_adsb_data') toast('No real ADS-B data for this area/time. Import tracks for the recording, or tick "Allow demo / synthetic flights".', 'warn', 12000);
             return;
         }
         const best = result.best_location;
@@ -474,12 +564,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             window.mapView.displayFlightTrajectory(result.flight_trajectory);
         }
         window.mapView.renderComparisonChart(result.curve_comparison, result.f0_hz);
+        if (RT.isSingleFlyover(result) && (result.matched_flights || []).length) {
+            window.mapView.displayAmbiguity(best, RT.mirrorAmbiguity(best, result.matched_flights[0]), result.clock_mode !== 'trusted_window');
+        } else {
+            window.mapView.clearAmbiguity();
+        }
 
         const supported = decision && decision.status === 'supported';
         const dotColor = supported ? '#10b981' : '#f59e0b';
         document.getElementById('mapOverlayBadge').innerHTML = `
             <span class="status-dot" style="background:${dotColor}; box-shadow:0 0 8px ${dotColor};"></span>
-            ${supported ? 'SUPPORTED' : 'INCONCLUSIVE'}: ${fmtNum(best.lat, 4)}, ${fmtNum(best.lon, 4)}
+            ${supported ? 'SUPPORTED' : 'INCONCLUSIVE'}: ${fmtNum(best.lat, 4)}, ${fmtNum(best.lon, 4)} ${badge(result.data_source)}
         `;
 
         if (window.innerWidth < 1200) {

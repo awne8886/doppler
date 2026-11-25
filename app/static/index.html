@@ -92,6 +92,9 @@
                         <button id="snapPeakBtn" class="btn btn-toggle active" title="Snap traced points to local spectral peak">Snap Peak</button>
                         <button id="undoTraceBtn" class="btn btn-sm">Undo</button>
                         <button id="clearTraceBtn" class="btn btn-sm btn-danger">Clear</button>
+                        <button id="saveSessionBtn" class="btn btn-sm" title="Save traced events and settings as JSON">Save session</button>
+                        <button id="loadSessionBtn" class="btn btn-sm" title="Load a saved trace session">Load session</button>
+                        <input type="file" id="sessionFileInput" accept=".json,application/json" class="file-input-hidden">
                     </div>
                     <div class="tool-group">
                         <label for="colormapSelect">Palette:</label>
@@ -364,6 +367,7 @@
     <script src="./js/config.js"></script>
     <script src="./js/util.js"></script>
     <script src="./js/track_import.js"></script>
+    <script src="./js/results.js"></script>
     <script src="./js/doppler_analysis.js"></script>
     <script src="./js/adsb_manager.js"></script>
     <script src="./js/api_client.js"></script>

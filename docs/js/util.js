@@ -66,5 +66,49 @@
         return null;
     }
 
-    root.DopplerUtil = Object.assign(root.DopplerUtil || {}, { escapeHtml, fmtNum, readWavStart });
+    /**
+     * Non-blocking notification (replaces alert()). kind: info | ok | warn | error.
+     * The message is set as text, never as HTML.
+     */
+    function toast(message, kind = 'info', timeoutMs = 7000) {
+        if (typeof document === 'undefined') return null;
+        let host = document.getElementById('toastHost');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'toastHost';
+            host.className = 'toast-host';
+            host.setAttribute('aria-live', 'polite');
+            document.body.appendChild(host);
+        }
+        const el = document.createElement('div');
+        el.className = `toast ${kind}`;
+        el.setAttribute('role', kind === 'error' || kind === 'warn' ? 'alert' : 'status');
+        const msg = document.createElement('span');
+        msg.className = 'toast-msg';
+        msg.textContent = String(message);
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.setAttribute('aria-label', 'Dismiss');
+        close.textContent = '\u00d7';
+        close.addEventListener('click', () => el.remove());
+        el.append(msg, close);
+        host.appendChild(el);
+        if (timeoutMs > 0) setTimeout(() => el.remove(), timeoutMs);
+        return el;
+    }
+
+    /** Offer a JS object / string as a file download. */
+    function downloadFile(filename, content, mime = 'application/json') {
+        const blob = new Blob([typeof content === 'string' ? content : JSON.stringify(content, null, 2)], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    root.DopplerUtil = Object.assign(root.DopplerUtil || {}, { escapeHtml, fmtNum, readWavStart, toast, downloadFile });
 })(typeof window !== 'undefined' ? window : globalThis);

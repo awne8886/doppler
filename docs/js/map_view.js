@@ -75,6 +75,7 @@ class MapView {
         this.gridMarkersLayer = L.layerGroup().addTo(this.map);
         this.flightLayer = L.layerGroup().addTo(this.map);
         this.altLayer = L.layerGroup().addTo(this.map);
+        this.ambiguityLayer = L.layerGroup().addTo(this.map);
 
         // Map click updates search center if user clicks holding Alt or Shift
         this.map.on('click', (e) => {
@@ -235,6 +236,30 @@ class MapView {
                 `)
                 .openPopup();
         }
+    }
+
+    /** Single-flyover mirror ambiguity: mirror point, connecting line and (free clock) along-track ridges. */
+    displayAmbiguity(best, amb, freeClock) {
+        this.ambiguityLayer.clearLayers();
+        L.circleMarker([amb.mirror.lat, amb.mirror.lon], { radius: 9, color: '#f59e0b', weight: 2, dashArray: '3,3', fillOpacity: 0.1 })
+            .bindPopup(`<div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
+                <strong>Mirror ambiguity</strong><br>${num(amb.mirror.lat, 5)}, ${num(amb.mirror.lon, 5)}<br>
+                ${num(amb.distance_m / 1000, 2)} km from the best point, across the flight track.<br>
+                One straight flyover sounds the same on both sides of its track.</div>`)
+            .addTo(this.ambiguityLayer);
+        L.polyline([[best.lat, best.lon], [amb.mirror.lat, amb.mirror.lon]], { color: '#f59e0b', weight: 1.5, dashArray: '2,6' })
+            .addTo(this.ambiguityLayer);
+        if (freeClock) {
+            for (const ridge of amb.ridges) {
+                L.polyline(ridge.map(p => [p.lat, p.lon]), { color: '#f59e0b', weight: 6, opacity: 0.25 })
+                    .bindTooltip('Ambiguity ridge: with a free recording clock the observer can also slide along the track.')
+                    .addTo(this.ambiguityLayer);
+            }
+        }
+    }
+
+    clearAmbiguity() {
+        if (this.ambiguityLayer) this.ambiguityLayer.clearLayers();
     }
 
     displayFlightTrajectories(trajectories) {
