@@ -500,12 +500,69 @@
         irls_iterations: 2, coarse_halfwidth_s: 6.0, coarse_step_s: 0.25, fine_halfwidth_s: 0.4, fine_step_s: 0.02,
         refine_clock_halfwidth_s: 1.0, max_gap_s: 20.0, observer_alt_m: 0.0, altitude_bias_m: 0.0,
         max_alternatives: 6, grid_max_points: 40,
+        wind_e: 0.0, wind_n: 0.0, wind_uncertainty_mps: 5.0, elevation: null,
     };
+
+    /**
+     * Travel time and Doppler factor (mirrors matching.propagation): exact
+     * uniform-wind solution c T = |R - W T|, f/f0 = (c + W.k) / (c + W.k - v.k)
+     * with k the air-frame wave normal. R: aircraft -> observer.
+     */
+    function propagation(rx, ry, rz, vx, vy, vz, c, we, wn) {
+        const d = Math.max(1, Math.sqrt(rx * rx + ry * ry + rz * rz));
+        if (!we && !wn) {
+            let u = -(rx * vx + ry * vy + rz * vz) / d;
+            u = Math.max(-0.95 * c, Math.min(0.95 * c, u));
+            return [d / c, c / (c + u)];
+        }
+        const w2 = we * we + wn * wn, rw = rx * we + ry * wn, a = c * c - w2;
+        const T = (-rw + Math.sqrt(rw * rw + a * d * d)) / a;
+        const kx = (rx - we * T) / (c * T), ky = (ry - wn * T) / (c * T), kz = rz / (c * T);
+        const ck = c + kx * we + ky * wn;
+        let u = -(vx * kx + vy * ky + vz * kz);
+        u = Math.max(-0.95 * ck, Math.min(0.95 * ck, u));
+        return [T, ck / (ck + u)];
+    }
+
+    /** Meteorological wind (speed, FROM direction) -> [east, north] toward. */
+    function windVector(speed, fromDeg) {
+        if (!speed) return [0, 0];
+        const th = (fromDeg || 0) * Math.PI / 180;
+        return [-speed * Math.sin(th), -speed * Math.cos(th)];
+    }
+
+    // ISA pressure altitude -> QNH altitude (mirrors app/physics/atmosphere.py).
+    const ISA = { T0: 288.15, L: 0.0065, P0: 1013.25, EXP: 9.80665 / (287.05287 * 0.0065) };
+    function qnhAltitude(pa, qnh) {
+        const p = ISA.P0 * Math.pow(1 - ISA.L * pa / ISA.T0, ISA.EXP);
+        return (ISA.T0 / ISA.L) * (1 - Math.pow(p / qnh, 1 / ISA.EXP));
+    }
+    function applyQnh(traj, qnh) {
+        if (traj.altitude_basis !== 'barometric' || traj.altitude_correction) return traj;
+        return Object.assign({}, traj, { altitudes: traj.altitudes.map(a => +qnhAltitude(a, qnh).toFixed(2)),
+            altitude_correction: { type: 'qnh', qnh_hpa: qnh } });
+    }
+
+    /** Bilinear lat/lon elevation grid as a local (x, y) -> metres callable (mirrors elevation.LatLonElevation). */
+    function latLonElevation(grid, centerLat, centerLon, datumOffset = 0) {
+        const v = grid.values, ny = v.length, nx = v[0].length;
+        if (ny < 2 || nx < 2 || !(grid.lat_max > grid.lat_min && grid.lon_max > grid.lon_min)) throw new Error('Invalid elevation grid.');
+        const geo = new GeoEngine();
+        return (x, y) => {
+            const g = geo.cartesianToGeodetic(x, y, 0, centerLat, centerLon, 0);
+            const fy = Math.min(Math.max((g.lat - grid.lat_min) / (grid.lat_max - grid.lat_min) * (ny - 1), 0), ny - 1);
+            const fx = Math.min(Math.max((g.lon - grid.lon_min) / (grid.lon_max - grid.lon_min) * (nx - 1), 0), nx - 1);
+            const iy = Math.min(Math.floor(fy), ny - 2), ix = Math.min(Math.floor(fx), nx - 2), ty = fy - iy, tx = fx - ix;
+            return (1 - ty) * ((1 - tx) * v[iy][ix] + tx * v[iy][ix + 1]) + ty * ((1 - tx) * v[iy + 1][ix] + tx * v[iy + 1][ix + 1]) + datumOffset;
+        };
+    }
 
     class TrajectoryModel {
         constructor(traj, centerLat, centerLon, engine, altBias = 0, maxGap = 20) {
             this.raw = traj;
             this.flight_id = String(traj.flight_id || 'UNKNOWN');
+            this.altitude_basis = String(traj.altitude_basis || 'unknown');
+            this.altitude_corrected = !!traj.altitude_correction;
             const n = traj.timestamps.length;
             const idx = [...Array(n).keys()].sort((a, b) => traj.timestamps[a] - traj.timestamps[b]);
             this.t = idx.map(i => traj.timestamps[i]);
@@ -530,17 +587,17 @@
             this.gapAfter = [];
             for (let i = 0; i < n - 1; i++) if (this.t[i + 1] - this.t[i] > maxGap) this.gapAfter.push(i);
         }
-        arrival(obs, c) {
+        arrival(obs, c, wind = null) {
             const n = this.t.length;
             const rec = new Array(n);
+            const we = wind ? wind[0] : 0, wn = wind ? wind[1] : 0;
             let dmin = Infinity, tcpa = 0;
             for (let i = 0; i < n; i++) {
-                const rx = this.pos[i].x - obs.x, ry = this.pos[i].y - obs.y, rz = this.pos[i].z - obs.z;
+                const rx = obs.x - this.pos[i].x, ry = obs.y - this.pos[i].y, rz = obs.z - this.pos[i].z;
                 const d = Math.max(1, Math.sqrt(rx * rx + ry * ry + rz * rz));
-                let ur = (rx * this.vel[i].vx + ry * this.vel[i].vy + rz * this.vel[i].vz) / d;
-                ur = Math.max(-0.95 * c, Math.min(0.95 * c, ur));
-                const to = this.t[i] + d / c;
-                rec[i] = [to, c / (c + ur), this.t[i]];
+                const [T, g] = propagation(rx, ry, rz, this.vel[i].vx, this.vel[i].vy, this.vel[i].vz, c, we, wn);
+                const to = this.t[i] + T;
+                rec[i] = [to, g, this.t[i]];
                 if (d < dmin) { dmin = d; tcpa = to; }
             }
             const gaps = this.gapAfter.map(i => [rec[i][0], rec[i + 1][0]]);
@@ -651,6 +708,10 @@
             this.clockWindow = clockWindow;
         }
 
+        observer(x, y, o) {
+            return { x, y, z: o.observer_alt_m + (o.elevation ? o.elevation(x, y) : 0) };
+        }
+
         allowed(gid) {
             let restrict = null;
             for (const ei of this.groups[gid]) {
@@ -719,7 +780,7 @@
 
         evaluatePoint(obs, starts = null, o = null, models = null, events = null) {
             o = o || this.o; models = models || this.models; events = events || this.events;
-            const curves = models.map(m => m.arrival(obs, o.speed_of_sound));
+            const curves = models.map(m => m.arrival(obs, o.speed_of_sound, [o.wind_e, o.wind_n]));
             starts = starts || this.candidateStarts(curves);
             const coarse = this.joint(curves, starts, o, events);
             if (!isFinite(coarse.total)) return coarse;
@@ -738,7 +799,7 @@
                     const inside = Math.hypot(x, y) <= R * 1.05;
                     const cell = { ix, iy, x, y, inside, loss: Infinity, start: 0 };
                     if (inside) {
-                        const r = this.evaluatePoint({ x, y, z: this.o.observer_alt_m }, null, null, null, this.eventsCoarse);
+                        const r = this.evaluatePoint(this.observer(x, y, this.o), null, null, null, this.eventsCoarse);
                         cell.loss = r.total; cell.start = r.start;
                     }
                     this.grid.cells.push(cell);
@@ -774,11 +835,11 @@
             const st = this.clipClock(starts);
             const step = this.grid ? this.grid.step : 400;
             const obj = (p) => {
-                const r = this.evaluatePoint({ x: p[0], y: p[1], z: o.observer_alt_m }, st, o, models, events);
+                const r = this.evaluatePoint(this.observer(p[0], p[1], o), st, o, models, events);
                 return isFinite(r.total) ? r.total : 1e12;
             };
             const nm = nelderMead(obj, [x0, y0], [0.5 * step, 0.5 * step], maxIter, 1e-6);
-            const r = this.evaluatePoint({ x: nm.x[0], y: nm.x[1], z: o.observer_alt_m }, st, o, models, events);
+            const r = this.evaluatePoint(this.observer(nm.x[0], nm.x[1], o), st, o, models, events);
             const clockEdge = !this.clockWindow && (Math.abs(r.start - st[0]) < 1e-6 || Math.abs(r.start - st[st.length - 1]) < 1e-6);
             return { x: nm.x[0], y: nm.x[1], loss: r.total, start: r.start, choice: r.choice, clock_at_refine_edge: clockEdge };
         }
@@ -789,8 +850,8 @@
         }
 
         diagnostics(x, y, start, choice) {
-            const obs = { x, y, z: this.o.observer_alt_m };
-            const curves = this.models.map(m => m.arrival(obs, this.o.speed_of_sound));
+            const obs = this.observer(x, y, this.o);
+            const curves = this.models.map(m => m.arrival(obs, this.o.speed_of_sound, [this.o.wind_e, this.o.wind_n]));
             const out = [];
             for (const gid of this.groupIds) {
                 const k = choice ? choice[gid] : -1;
@@ -844,27 +905,58 @@
             };
         }
 
+        /** Mirrors JointMatcher.altitude_perturbation_m: 150 m geometric, 200 m baro+QNH, 300 m otherwise. */
+        altitudePerturbation(choice) {
+            const idx = choice ? Object.values(choice).filter(k => k != null && k >= 0) : [];
+            const list = idx.length ? idx : this.models.map((m, k) => k);
+            let delta = 150;
+            for (const k of list) {
+                const m = this.models[k];
+                if (m.altitude_basis === 'geometric') continue;
+                delta = Math.max(delta, m.altitude_basis === 'barometric' && m.altitude_corrected ? 200 : 300);
+            }
+            return delta;
+        }
+
+        /** Same declared perturbations as the Python backend (sound speed, altitude, wind, frequency). */
         async sensitivity(best, onProgress) {
             const scenarios = [];
             const base = this.o;
-            const runOne = async (name, o, models) => {
-                const r = this.refine(best.x, best.y, best.start, o, models, null, 60);
+            const altDelta = this.altitudePerturbation(best.choice);
+            const dw = base.wind_uncertainty_mps;
+            const d = base.loss_scale_hz;
+            const tilt = (t) => { const span = Math.max(t[t.length - 1] - t[0], 1e-6), mid = 0.5 * (t[0] + t[t.length - 1]); return t.map(x => ((x - mid) / span) * 2); };
+            const fmt = (v) => `${v > 0 ? '+' : ''}${Math.round(v)}`;
+            const jobs = [];
+            for (const dc of [-5, 5]) jobs.push([`sound_speed_${fmt(dc)}mps`, Object.assign({}, base, { speed_of_sound: base.speed_of_sound + dc }), null, null]);
+            for (const da of [-altDelta, altDelta]) {
+                jobs.push([`altitude_${fmt(da)}m`, base, this.rawTrajectories.map(t => new TrajectoryModel(t, this.center.lat, this.center.lon, this.engine, base.altitude_bias_m + da, base.max_gap_s)), null]);
+            }
+            if (dw > 0) {
+                for (const [name, de, dn] of [['wind_east', dw, 0], ['wind_west', -dw, 0], ['wind_north', 0, dw], ['wind_south', 0, -dw]]) {
+                    jobs.push([`${name}_${Math.round(dw)}mps`, Object.assign({}, base, { wind_e: base.wind_e + de, wind_n: base.wind_n + dn }), null, null]);
+                }
+            }
+            const shift = (fn) => this.events.map(e => Object.assign({}, e, { f: fn(e) }));
+            jobs.push(['freq_offset_+', base, null, shift(e => e.f.map(v => v + d))]);
+            jobs.push(['freq_offset_-', base, null, shift(e => e.f.map(v => v - d))]);
+            jobs.push(['freq_tilt_+', base, null, shift(e => { const w = tilt(e.t); return e.f.map((v, i) => v + d * w[i]); })]);
+            jobs.push(['freq_tilt_-', base, null, shift(e => { const w = tilt(e.t); return e.f.map((v, i) => v - d * w[i]); })]);
+            for (const [name, o, models, events] of jobs) {
+                const r = this.refine(best.x, best.y, best.start, o, models, events);
                 const ok = isFinite(r.loss);
-                scenarios.push({ scenario: name, ok, displacement_m: ok ? +Math.hypot(r.x - best.x, r.y - best.y).toFixed(1) : null });
-                if (onProgress) onProgress('sensitivity', scenarios.length / 4);
+                scenarios.push({ scenario: name, ok, displacement_m: ok ? +Math.hypot(r.x - best.x, r.y - best.y).toFixed(1) : null,
+                    clock_shift_s: ok ? +(r.start - best.start).toFixed(3) : null });
+                if (onProgress) onProgress('sensitivity', scenarios.length / jobs.length);
                 await new Promise(r2 => setTimeout(r2, 0));
-            };
-            for (const dc of [-5, 5]) await runOne(`sound_speed_${dc > 0 ? '+' : ''}${dc}mps`, Object.assign({}, base, { speed_of_sound: base.speed_of_sound + dc }), null);
-            for (const da of [-150, 150]) {
-                const models = this.rawTrajectories.map(t => new TrajectoryModel(t, this.center.lat, this.center.lon, this.engine, base.altitude_bias_m + da, base.max_gap_s));
-                await runOne(`altitude_${da > 0 ? '+' : ''}${da}m`, base, models);
             }
             const oks = scenarios.filter(s => s.ok);
             return {
                 complete: oks.length === scenarios.length,
                 radius_m: oks.length ? Math.max(...oks.map(s => s.displacement_m)) : null,
-                scenarios, sources: ['sound_speed', 'altitude'],
-                note: 'Declared engineering perturbations (reduced browser set); not a calibrated confidence interval.',
+                scenarios, sources: dw > 0 ? ['sound_speed', 'altitude', 'wind', 'frequency'] : ['sound_speed', 'altitude', 'frequency'],
+                altitude_perturbation_m: altDelta, wind_perturbation_mps: dw,
+                note: 'Declared engineering perturbations; not a calibrated confidence interval.',
             };
         }
     }
@@ -1149,5 +1241,6 @@
         FlyoverFit, RidgeDiscovery, JointMatcher, TrajectoryModel, GeoEngine, decideLocation, robustRmse, nelderMead,
         fitEventAt, speedOfSound, speedOfSoundFor, DEFAULT_MATCH, DEFAULT_POLICY, REASONS,
         conditionTrajectory, localQuadratic, prefilterFlights, fitIsReliable, flightGroundSpeed, PREFILTER,
+        propagation, windVector, qnhAltitude, applyQnh, latLonElevation,
     };
 })(typeof window !== 'undefined' ? window : globalThis);

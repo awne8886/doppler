@@ -108,16 +108,33 @@ class ApiClient {
             const target = flights.filter(f => f.flight_id === payload.flight_id);
             if (target.length) flights = target;
         }
+        if (payload.qnh_hpa != null) flights = flights.map(f => DA.applyQnh(f, payload.qnh_hpa));
         if (payload.condition_tracks !== false) {
             flights = flights.map(f => (['historical', 'uploaded'].includes(f.data_source) ? DA.conditionTrajectory(f) : f));
         }
         const c = DA.speedOfSoundFor(payload.temperature_c, payload.relative_humidity_pct);
+        const [windE, windN] = DA.windVector(payload.wind_speed_mps, payload.wind_from_deg);
+        let elevation = null, elevationNote = 'flat_ground';
+        if (payload.observer_elevation_grid) {
+            elevation = DA.latLonElevation(payload.observer_elevation_grid, payload.center_lat, payload.center_lon, payload.elevation_datum_offset_m || 0);
+            elevationNote = 'user_grid';
+        } else if (payload.dem_lookup) {
+            elevationNote = 'dem_unavailable_flat_ground';
+        }
         const opts = {
             speed_of_sound: c,
             fit_f0: payload.fit_f0 !== false,
             loss_scale_hz: payload.loss_scale_hz || 2.0,
             drift_fraction: payload.drift_fraction != null ? payload.drift_fraction : 0.02,
             observer_alt_m: payload.observer_alt_m || 0,
+            wind_e: windE, wind_n: windN,
+            wind_uncertainty_mps: payload.wind_uncertainty_mps != null ? payload.wind_uncertainty_mps : 5.0,
+            elevation,
+        };
+        provenance.atmosphere = {
+            speed_of_sound_mps: +c.toFixed(3), wind_east_mps: +windE.toFixed(3), wind_north_mps: +windN.toFixed(3),
+            wind_speed_mps: payload.wind_speed_mps || 0, wind_from_deg: payload.wind_from_deg ?? null,
+            wind_uncertainty_mps: opts.wind_uncertainty_mps, qnh_hpa: payload.qnh_hpa ?? null, elevation: elevationNote,
         };
         if (!opts.fit_f0) events.forEach(e => { e.f0 = e.f0 || payload.f0; });
         const clock = payload.recording_start_epoch != null

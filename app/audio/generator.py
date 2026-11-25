@@ -185,6 +185,97 @@ def synthesize_multi_flyover_wav(
     return output_wav_path
 
 
+def emission_arrivals(trajectory: Dict[str, Any], observer_coords: Tuple[float, float],
+                      wind_en: Tuple[float, float] = (0.0, 0.0), speed_of_sound: float = 343.2,
+                      observer_alt_m: float = 0.0, dt: float = 0.02) -> Dict[str, np.ndarray]:
+    """
+    First-principles forward model, independent of the matcher's Doppler formula.
+
+    The trajectory is densified (linear interpolation in local ENU, exact for
+    straight constant-velocity tracks).  For every emission time tau the
+    travel time T through air moving uniformly with ``wind_en`` (east, north
+    toward) is found by fixed-point iteration of ``c T = |R - W T|`` (sound
+    moves at c relative to the air; the observer drifts by -W T in the air
+    frame).  The received frequency factor is the numerical derivative
+    ``d tau / d t_arrival`` - no Doppler equation is used, so this checks the
+    matcher's analytic model rather than repeating it.
+    """
+    engine = DopplerEngine()
+    t = np.asarray(trajectory["timestamps"], dtype=np.float64)
+    x, y, z = engine.geodetic_to_cartesian(np.asarray(trajectory["latitudes"]), np.asarray(trajectory["longitudes"]),
+                                           np.asarray(trajectory["altitudes"]), observer_coords[0], observer_coords[1], 0.0)
+    tau = t[0] + dt * np.arange(int(np.floor((t[-1] - t[0]) / dt + 1e-9)) + 1)
+    S = np.stack([np.interp(tau, t, x), np.interp(tau, t, y), np.interp(tau, t, z)], axis=1)
+    R = np.array([0.0, 0.0, observer_alt_m]) - S
+    W = np.array([wind_en[0], wind_en[1], 0.0])
+    T = np.linalg.norm(R, axis=1) / speed_of_sound
+    for _ in range(12):
+        T = np.linalg.norm(R - np.outer(T, W), axis=1) / speed_of_sound
+    t_arr = tau + T
+    factor = np.gradient(tau, t_arr)
+    return {"tau": tau, "t": t_arr, "factor": factor, "d": np.linalg.norm(R, axis=1)}
+
+
+def simulate_events(trajectories: List[Dict[str, Any]], observer_coords: Tuple[float, float],
+                    recording_start_epoch: float, duration_sec: float, wind_en: Tuple[float, float] = (0.0, 0.0),
+                    speed_of_sound: float = 343.2, observer_alt_m: float = 0.0, step: float = 0.25,
+                    min_duration_s: float = 8.0, margin_s: float = 1.0) -> List[Dict[str, Any]]:
+    """Noise-free traced events (recording-relative time) for every flight audible in the recording."""
+    events = []
+    for tr in trajectories:
+        a = emission_arrivals(tr, observer_coords, wind_en, speed_of_sound, observer_alt_m)
+        lo = max(a["t"][2], recording_start_epoch + margin_s)
+        hi = min(a["t"][-3], recording_start_epoch + duration_sec - margin_s)
+        if hi - lo < min_duration_s:
+            continue
+        t_abs = np.arange(lo, hi, step)
+        f = np.interp(t_abs, a["t"], a["factor"]) * float(tr.get("f0_hz", 800.0))
+        events.append({"id": tr["flight_id"], "traced_curve": [
+            {"time": float(tt - recording_start_epoch), "freq": float(ff)} for tt, ff in zip(t_abs, f)]})
+    return events
+
+
+def synthesize_emission_phase_wav(trajectories: List[Dict[str, Any]], observer_coords: Tuple[float, float],
+                                  output_wav_path: str, recording_start_epoch: float, duration_sec: float,
+                                  wind_en: Tuple[float, float] = (0.0, 0.0), speed_of_sound: float = 343.2,
+                                  observer_alt_m: float = 0.0, sample_rate: int = 16000,
+                                  reference_distance_m: float = 1500.0, noise_level: float = 0.05, seed: int = 7,
+                                  harmonics: Tuple[float, ...] = (1.0, 0.35, 0.15)) -> str:
+    """
+    Audio whose phase is the source phase at emission, ``2 pi f0 tau(t)``,
+    with tau(t) from :func:`emission_arrivals` (wind and observer height
+    included).  The Doppler shift emerges from the propagation geometry.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(duration_sec * sample_rate)
+    t_abs = recording_start_epoch + np.arange(n) / sample_rate
+    mix = np.zeros(n)
+    for tr in trajectories:
+        a = emission_arrivals(tr, observer_coords, wind_en, speed_of_sound, observer_alt_m)
+        live = (t_abs >= a["t"][0]) & (t_abs <= a["t"][-1])
+        if not np.any(live):
+            continue
+        tau = np.interp(t_abs, a["t"], a["tau"])
+        phase = 2.0 * np.pi * float(tr.get("f0_hz", 800.0)) * (tau - a["tau"][0])
+        d = np.interp(t_abs, a["t"], a["d"])
+        amp = np.where(live, (reference_distance_m / np.maximum(d, 100.0)) ** 1.1, 0.0)
+        edge = np.convolve(live.astype(float), np.ones(int(0.2 * sample_rate)) / (0.2 * sample_rate), mode="same")
+        tone = sum(h * np.sin((k + 1) * phase) for k, h in enumerate(harmonics))
+        mix += 0.7 * tone * amp * np.minimum(edge, 1.0)
+    noise = np.convolve(rng.normal(0.0, noise_level, n), np.ones(9) / 9.0, mode="same")
+    signal = mix + noise
+    fade = int(0.3 * sample_rate)
+    signal[:fade] *= np.linspace(0, 1, fade)
+    signal[-fade:] *= np.linspace(1, 0, fade)
+    signal = signal / (np.max(np.abs(signal)) + 1e-9)
+    with wave.open(output_wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes((signal * 32760.0).astype(np.int16).tobytes())
+    return output_wav_path
+
+
 SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "samples")
 
 

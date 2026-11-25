@@ -32,7 +32,9 @@ from app.config import Settings
 from app.physics.confidence import DecisionPolicy, decide_location
 from app.physics.doppler_engine import DopplerEngine
 from app.physics.flyover_fit import fit_flyover, kinematic_consistency
-from app.physics.matching import JointMatcher, MatchOptions, robust_rmse
+from app.physics.atmosphere import apply_qnh
+from app.physics.elevation import LatLonElevation, build_dem_provider, dem_grid
+from app.physics.matching import JointMatcher, MatchOptions, robust_rmse, wind_vector
 from app.physics.prefilter import prefilter_flights
 
 APP_VERSION = "1.2.0"
@@ -139,7 +141,17 @@ class GeolocateRequest(BaseModel):
     clock_tolerance_s: float = Field(2.0, ge=0.0, le=3600.0, description="Half-width of the trusted clock window")
     temperature_c: Optional[float] = Field(None, ge=-60.0, le=60.0, description="Air temperature for the speed of sound")
     relative_humidity_pct: Optional[float] = Field(None, ge=0.0, le=100.0, description="Relative humidity for the speed of sound (default 50 % when temperature is given)")
-    observer_alt_m: float = Field(0.0, description="Microphone height in the trajectory altitude datum")
+    observer_alt_m: float = Field(0.0, description="Microphone height in the trajectory altitude datum "
+                                  "(above the ground when an elevation grid or DEM lookup is used)")
+    wind_speed_mps: Optional[float] = Field(None, ge=0.0, le=60.0, description="Uniform horizontal wind speed")
+    wind_from_deg: Optional[float] = Field(None, ge=0.0, le=360.0, description="Direction the wind blows FROM (deg true)")
+    wind_uncertainty_mps: float = Field(5.0, ge=0.0, le=30.0, description="Per-axis wind perturbation in the sensitivity analysis")
+    qnh_hpa: Optional[float] = Field(None, ge=870.0, le=1090.0, description="QNH to correct barometric (pressure) altitudes")
+    observer_elevation_grid: Optional[Dict[str, Any]] = Field(
+        None, description="Ground elevation grid {lat_min, lat_max, lon_min, lon_max, values[[...]]} in metres")
+    dem_lookup: bool = Field(False, description="Look up ground elevation from a DEM service (network, cached)")
+    elevation_datum_offset_m: float = Field(0.0, description="Added to grid/DEM elevations, e.g. the geoid undulation "
+                                            "when tracks use GNSS (ellipsoidal) altitude")
     sensitivity: bool = Field(True, description="Run perturbation sensitivity analysis")
     max_rmse_hz: float = Field(3.0, gt=0.0, description="Decision threshold for per-event RMSE")
     min_independent_flyovers: int = Field(2, ge=1, le=10)
@@ -406,8 +418,11 @@ def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
     if req.flight_id:
         target = [f for f in flights if f.get("flight_id") == req.flight_id]
         flights = target or flights
+    if req.qnh_hpa is not None:
+        flights = [apply_qnh(f, req.qnh_hpa) for f in flights]
     if req.condition_tracks:
         flights = [condition_trajectory(f) if f.get("data_source") in CONDITIONED_SOURCES else f for f in flights]
+    elevation, elevation_note = _elevation_model(req)
 
     flyover_fits = _flyover_fits(raw_events, c)
     discarded: List[Dict[str, Any]] = []
@@ -421,10 +436,17 @@ def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
                 "decision": decision, "flyover_fits": flyover_fits,
                 "evaluated_flights": _flight_summaries(flights, [], flyover_fits, discarded), **provenance}
 
+    wind_e, wind_n = wind_vector(req.wind_speed_mps, req.wind_from_deg)
     opts = MatchOptions(
         speed_of_sound=c, fit_f0=req.fit_f0, drift_fraction=req.drift_fraction,
         loss_scale_hz=req.loss_scale_hz, observer_alt_m=req.observer_alt_m,
+        wind_e=wind_e, wind_n=wind_n, wind_uncertainty_mps=req.wind_uncertainty_mps, elevation=elevation,
     )
+    provenance["atmosphere"] = {
+        "speed_of_sound_mps": round(c, 3), "wind_east_mps": round(wind_e, 3), "wind_north_mps": round(wind_n, 3),
+        "wind_speed_mps": req.wind_speed_mps or 0.0, "wind_from_deg": req.wind_from_deg,
+        "wind_uncertainty_mps": req.wind_uncertainty_mps, "qnh_hpa": req.qnh_hpa, "elevation": elevation_note,
+    }
     try:
         matcher = JointMatcher(candidates, raw_events, req.center_lat, req.center_lon, opts, clock_window)
         res = matcher.run(req.radius_km, req.grid_resolution or 25, sensitivity=req.sensitivity,
@@ -444,6 +466,23 @@ def run_geolocation(req: GeolocateRequest, progress=None) -> Dict[str, Any]:
     out = _format_result(matcher, res, decision, flights, flyover_fits, opts, discarded)
     out.update(provenance)
     return out
+
+
+def _elevation_model(req: GeolocateRequest):
+    """Ground elevation callable for the matcher (None = flat ground) and a note describing its source."""
+    try:
+        if req.observer_elevation_grid:
+            return (LatLonElevation(req.observer_elevation_grid, req.center_lat, req.center_lon,
+                                    req.elevation_datum_offset_m), "user_grid")
+        if req.dem_lookup:
+            provider = build_dem_provider(settings.cache_dir)
+            grid = dem_grid(provider, req.center_lat, req.center_lon, req.radius_km) if provider else None
+            if grid is None:
+                return None, "dem_unavailable_flat_ground"
+            return LatLonElevation(grid, req.center_lat, req.center_lon, req.elevation_datum_offset_m), "dem"
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid elevation grid: {e}")
+    return None, "flat_ground"
 
 
 def _recording_window(req: GeolocateRequest, raw_events: List[Dict[str, Any]]):

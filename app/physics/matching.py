@@ -51,6 +51,12 @@ class MatchOptions:
     max_gap_s: float = 20.0
     observer_alt_m: float = 0.0
     altitude_bias_m: float = 0.0
+    wind_e: float = 0.0  # uniform horizontal wind toward east [m/s]
+    wind_n: float = 0.0  # uniform horizontal wind toward north [m/s]
+    wind_uncertainty_mps: float = 5.0  # +/- perturbation per axis in the sensitivity analysis
+    # Optional ground elevation (callable (x, y) -> metres in the trajectory altitude datum).
+    # The observer height is observer_alt_m + elevation(x, y); None means flat ground at observer_alt_m.
+    elevation: Optional[Any] = None
     max_alternatives: int = 6
     grid_max_points: int = 40  # events are decimated to this many samples for the coarse grid
 
@@ -105,6 +111,8 @@ class TrajectoryModel:
                  engine: DopplerEngine, altitude_bias_m: float = 0.0, max_gap_s: float = 20.0):
         self.raw = traj
         self.flight_id = str(traj.get("flight_id", "UNKNOWN"))
+        self.altitude_basis = str(traj.get("altitude_basis") or "unknown")
+        self.altitude_corrected = bool(traj.get("altitude_correction"))
         t = np.asarray(traj["timestamps"], dtype=np.float64)
         order = np.argsort(t)
         self.t_emit = t[order]
@@ -123,19 +131,70 @@ class TrajectoryModel:
         gaps = np.diff(self.t_emit)
         self.gap_after = np.where(gaps > max_gap_s)[0]
 
-    def arrival(self, obs: np.ndarray, c: float) -> Dict[str, np.ndarray]:
+    def arrival(self, obs: np.ndarray, c: float, wind: Optional[Sequence[float]] = None) -> Dict[str, np.ndarray]:
+        """
+        Arrival times and Doppler factors at an observer, optionally in a
+        uniform horizontal wind ``wind = (east, north)`` [m/s, direction the air
+        moves toward].  See :func:`propagation` for the derivation.
+        """
         r = self.pos - obs
         d = np.maximum(np.linalg.norm(r, axis=1), 1.0)
-        u_r = np.sum(r * self.vel, axis=1) / d  # receding radial speed at emission
-        u_r = np.clip(u_r, -0.95 * c, 0.95 * c)
-        t_obs = self.t_emit + d / c
-        g = c / (c + u_r)
+        T, g = propagation(-r, self.vel, c, wind)
+        t_obs = self.t_emit + T
         order = np.argsort(t_obs)
         gaps = [(t_obs[i], t_obs[i + 1]) for i in self.gap_after]
         return {
             "t": t_obs[order], "g": g[order], "tau": self.t_emit[order], "d": d[order],
             "t_cpa": float(t_obs[int(np.argmin(d))]), "gaps": gaps,
         }
+
+
+def propagation(R: np.ndarray, vel: np.ndarray, c: float, wind: Optional[Sequence[float]] = None):
+    """
+    Travel time and Doppler factor from aircraft to observer.
+
+    ``R`` is the vector from the aircraft (at emission) to the observer and
+    ``vel`` the aircraft ground velocity.  In a uniform wind W (ground frame,
+    horizontal) sound moves at c relative to the air, so the travel time T
+    solves ``c T = |R - W T|``::
+
+        T = (-R.W + sqrt((R.W)^2 + (c^2 - |W|^2) |R|^2)) / (c^2 - |W|^2)
+          ~ |R| / (c + W.n),  n = R/|R|  (the usual effective sound speed)
+
+    Differentiating with respect to emission time gives the received
+    frequency factor::
+
+        f/f0 = (c + W.k) / (c + W.k - v.k),   k = (R - W T) / (c T)
+
+    where k is the *air-frame* wave normal, not the ground ray n (k ~ n -
+    W_perp / c).  Using n instead drops a first-order term v.W_perp / c,
+    comparable to W.n for aircraft speeds, so the exact form is used.  With
+    W = 0 this reduces to T = |R|/c and f/f0 = c / (c + u_r), u_r = -v.n the
+    receding radial speed.  The receding speed along k is clipped to 0.95 of
+    the local phase speed for numerical safety.
+    """
+    d = np.maximum(np.linalg.norm(R, axis=1), 1.0)
+    if wind is None or (abs(float(wind[0])) < 1e-12 and abs(float(wind[1])) < 1e-12):
+        u = -np.sum(R * vel, axis=1) / d  # receding speed along the ray
+        u = np.clip(u, -0.95 * c, 0.95 * c)
+        return d / c, c / (c + u)
+    W = np.array([float(wind[0]), float(wind[1]), 0.0])
+    w2 = float(W @ W)
+    rw = R @ W
+    a = c * c - w2
+    T = (-rw + np.sqrt(rw * rw + a * d * d)) / a
+    k = (R - np.outer(T, W)) / (c * T)[:, None]
+    ck = c + k @ W
+    u = np.clip(-np.sum(vel * k, axis=1), -0.95 * ck, 0.95 * ck)
+    return T, ck / (ck + u)
+
+
+def wind_vector(speed_mps: Optional[float], from_deg: Optional[float]) -> Tuple[float, float]:
+    """Meteorological wind (speed, direction it blows FROM, deg clockwise from north) -> (east, north) toward."""
+    if not speed_mps:
+        return (0.0, 0.0)
+    th = math.radians(float(from_deg or 0.0))
+    return (-float(speed_mps) * math.sin(th), -float(speed_mps) * math.cos(th))
 
 
 def fit_event(curve: Dict[str, Any], ev: EventData, starts: np.ndarray, opts: MatchOptions) -> Dict[str, np.ndarray]:
@@ -255,6 +314,15 @@ class JointMatcher:
             raise ValueError("No flight trajectories supplied.")
 
     # ------------------------------------------------------------------ core
+    @staticmethod
+    def observer(x: float, y: float, opts: MatchOptions) -> np.ndarray:
+        z = opts.observer_alt_m + (float(opts.elevation(x, y)) if opts.elevation is not None else 0.0)
+        return np.array([x, y, z])
+
+    @staticmethod
+    def wind(opts: MatchOptions) -> Tuple[float, float]:
+        return (opts.wind_e, opts.wind_n)
+
     def _allowed(self, gid: str) -> List[int]:
         restrict = None
         for ei in self.groups[gid]:
@@ -317,7 +385,7 @@ class JointMatcher:
         """Best joint loss at one observer position, optimising the shared clock."""
         opts = opts or self.opts
         models = models or self.models
-        curves = [m.arrival(obs, opts.speed_of_sound) for m in models]
+        curves = [m.arrival(obs, opts.speed_of_sound, self.wind(opts)) for m in models]
         if starts is None:
             starts = self._candidate_starts(curves)
         total, choice = self._joint(curves, starts, opts, events)
@@ -344,7 +412,7 @@ class JointMatcher:
             for ix in range(grid_resolution):
                 if not inside[iy, ix]:
                     continue
-                obs = np.array([X[iy, ix], Y[iy, ix], self.opts.observer_alt_m])
+                obs = self.observer(float(X[iy, ix]), float(Y[iy, ix]), self.opts)
                 l, s, _ = self.evaluate_point(obs, events=self.events_coarse)
                 loss[iy, ix] = l
                 start[iy, ix] = s
@@ -378,7 +446,7 @@ class JointMatcher:
         def obj(p):
             key = (round(p[0], 2), round(p[1], 2))
             if key not in cache:
-                l, s, ch = self.evaluate_point(np.array([p[0], p[1], opts.observer_alt_m]), starts, opts, models, events)
+                l, s, ch = self.evaluate_point(self.observer(p[0], p[1], opts), starts, opts, models, events)
                 cache[key] = (l, s, ch)
             l = cache[key][0]
             return l if np.isfinite(l) else 1e12
@@ -387,7 +455,7 @@ class JointMatcher:
         res = minimize(obj, np.array([x0, y0]), method="Nelder-Mead",
                        options={"initial_simplex": init, "xatol": 2.0, "fatol": 1e-4, "maxiter": 160})
         x, y = float(res.x[0]), float(res.x[1])
-        l, s, ch = self.evaluate_point(np.array([x, y, opts.observer_alt_m]), starts, opts, models, events)
+        l, s, ch = self.evaluate_point(self.observer(x, y, opts), starts, opts, models, events)
         clock_edge = bool(self.clock_window is None and (abs(s - starts[0]) < 1e-6 or abs(s - starts[-1]) < 1e-6))
         return {"x": x, "y": y, "loss": l, "start": s, "choice": ch, "clock_at_refine_edge": clock_edge,
                 "converged": bool(res.success)}
@@ -397,8 +465,8 @@ class JointMatcher:
         return float(lat), float(lon)
 
     def diagnostics(self, x: float, y: float, start: float, choice: Dict[str, int]) -> List[Dict[str, Any]]:
-        obs = np.array([x, y, self.opts.observer_alt_m])
-        curves = [m.arrival(obs, self.opts.speed_of_sound) for m in self.models]
+        obs = self.observer(x, y, self.opts)
+        curves = [m.arrival(obs, self.opts.speed_of_sound, self.wind(self.opts)) for m in self.models]
         out = []
         for gid in self.group_ids:
             k = choice.get(gid, -1)
@@ -465,10 +533,28 @@ class JointMatcher:
             "sensitivity": sens, "robust_rmse_hz": best_rr, "n_groups": n_groups,
         }
 
-    def sensitivity(self, best: Dict[str, Any], c_delta: float = 5.0, alt_delta: float = 150.0) -> Dict[str, Any]:
+    def altitude_perturbation_m(self, choice: Optional[Dict[str, int]] = None) -> float:
+        """
+        Altitude perturbation for the sensitivity analysis, widened when the
+        matched trajectories' altitudes are barometric: geometric 150 m,
+        barometric corrected with QNH 200 m, barometric uncorrected or unknown
+        datum 300 m (+/-30 hPa of unknown QNH is ~250 m).
+        """
+        idx = [k for k in (choice or {}).values() if k is not None and k >= 0] or range(len(self.models))
+        delta = 150.0
+        for k in idx:
+            m = self.models[k]
+            if m.altitude_basis == "geometric":
+                continue
+            delta = max(delta, 200.0 if (m.altitude_basis == "barometric" and m.altitude_corrected) else 300.0)
+        return delta
+
+    def sensitivity(self, best: Dict[str, Any], c_delta: float = 5.0, alt_delta: Optional[float] = None) -> Dict[str, Any]:
         """Re-run refinement under declared perturbations; report the max displacement."""
         scenarios = []
         base = self.opts
+        if alt_delta is None:
+            alt_delta = self.altitude_perturbation_m(best.get("choice"))
 
         def run(name, opts=None, models=None, events=None):
             try:
@@ -487,6 +573,11 @@ class JointMatcher:
             models = [TrajectoryModel(t, self.center[0], self.center[1], self.engine, base.altitude_bias_m + da, base.max_gap_s)
                       for t in self.raw_trajectories]
             run(f"altitude_{da:+.0f}m", models=models)
+        dw = base.wind_uncertainty_mps
+        if dw > 0:
+            for name, de, dn in (("wind_east", dw, 0.0), ("wind_west", -dw, 0.0),
+                                 ("wind_north", 0.0, dw), ("wind_south", 0.0, -dw)):
+                run(f"{name}_{dw:.0f}mps", opts=replace(base, wind_e=base.wind_e + de, wind_n=base.wind_n + dn))
         d = base.loss_scale_hz
         for name, fn in (("freq_offset_+", lambda e: e.f + d), ("freq_offset_-", lambda e: e.f - d),
                          ("freq_tilt_+", lambda e: e.f + d * _tilt(e.t)), ("freq_tilt_-", lambda e: e.f - d * _tilt(e.t))):
@@ -499,9 +590,34 @@ class JointMatcher:
             "complete": len(oks) == len(scenarios),
             "radius_m": radius,
             "scenarios": scenarios,
-            "sources": ["sound_speed", "altitude", "frequency"],
+            "sources": ["sound_speed", "altitude", "wind", "frequency"] if dw > 0 else ["sound_speed", "altitude", "frequency"],
+            "altitude_perturbation_m": alt_delta,
+            "wind_perturbation_mps": dw,
             "note": "Declared engineering perturbations; not a calibrated confidence interval.",
         }
+
+
+class ElevationGrid:
+    """
+    Ground elevation on a regular local grid (metres, trajectory altitude datum),
+    bilinearly interpolated and clamped at the edges.  ``values[iy][ix]`` is the
+    elevation at ``(x0 + ix*step, y0 + iy*step)`` in the matcher's local frame.
+    """
+
+    def __init__(self, x0: float, y0: float, step: float, values: Sequence[Sequence[float]]):
+        self.x0, self.y0, self.step = float(x0), float(y0), float(step)
+        self.values = np.asarray(values, dtype=np.float64)
+        if self.values.ndim != 2 or min(self.values.shape) < 2 or not np.all(np.isfinite(self.values)):
+            raise ValueError("Elevation grid must be a finite 2-D array of at least 2x2 values.")
+
+    def __call__(self, x: float, y: float) -> float:
+        ny, nx = self.values.shape
+        fx = min(max((x - self.x0) / self.step, 0.0), nx - 1.0)
+        fy = min(max((y - self.y0) / self.step, 0.0), ny - 1.0)
+        ix, iy = min(int(fx), nx - 2), min(int(fy), ny - 2)
+        tx, ty = fx - ix, fy - iy
+        v = self.values
+        return float((1 - ty) * ((1 - tx) * v[iy, ix] + tx * v[iy, ix + 1]) + ty * ((1 - tx) * v[iy + 1, ix] + tx * v[iy + 1, ix + 1]))
 
 
 def _decimate(ev: EventData, n: int) -> EventData:

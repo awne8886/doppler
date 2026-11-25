@@ -381,6 +381,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             if (tempVal !== '') payload.temperature_c = parseFloat(tempVal);
             if (humidityVal !== '') payload.relative_humidity_pct = parseFloat(humidityVal);
+            const windSpeed = document.getElementById('windSpeedInput').value;
+            const windFrom = document.getElementById('windFromInput').value;
+            const qnh = document.getElementById('qnhInput').value;
+            if (windSpeed !== '' && parseFloat(windSpeed) > 0) {
+                payload.wind_speed_mps = parseFloat(windSpeed);
+                payload.wind_from_deg = windFrom !== '' ? parseFloat(windFrom) : 0;
+            }
+            if (qnh !== '') payload.qnh_hpa = parseFloat(qnh);
 
             const result = await window.apiClient.geolocateObserver(payload, (stage, frac) => {
                 loadingMessage.textContent = `Client physics: ${stage} ${Math.round(frac * 100)}%`;
