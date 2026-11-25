@@ -4,7 +4,9 @@ ADSB.lol live aircraft client (open, keyless community ADS-B network).
 Used as a fallback when OpenSky returns no data.  Values are converted to the
 same SI state-vector layout the OpenSky client produces.  Geometric (GNSS)
 altitude is preferred over barometric altitude when both are reported, since
-Doppler geometry needs a true height; the chosen basis is recorded.
+Doppler geometry needs a true height; the chosen basis is recorded.  Aircraft
+on the ground and states without position, ground speed, track or altitude are
+skipped rather than filled with invented defaults.
 """
 
 import logging
@@ -46,7 +48,9 @@ class AdsbLolClient:
         for ac in payload.get("ac") or []:
             if ac.get("lat") is None or ac.get("lon") is None:
                 continue
-            if ac.get("alt_baro") == "ground":
+            if ac.get("alt_baro") == "ground" or ac.get("ground") is True:
+                continue
+            if not isinstance(ac.get("gs"), (int, float)) or not isinstance(ac.get("track"), (int, float)):
                 continue
             if isinstance(ac.get("alt_geom"), (int, float)):
                 alt_m, basis = float(ac["alt_geom"]) * FT_TO_M, "geometric"
@@ -54,7 +58,7 @@ class AdsbLolClient:
                 alt_m, basis = float(ac["alt_baro"]) * FT_TO_M, "barometric"
             else:
                 continue
-            rate = ac.get("geom_rate", ac.get("baro_rate", 0.0)) or 0.0
+            rate = ac.get("geom_rate", ac.get("baro_rate"))
             seen = float(ac.get("seen_pos", 0.0) or 0.0)
             out.append({
                 "icao24": str(ac.get("hex", "")).lower(),
@@ -65,9 +69,10 @@ class AdsbLolClient:
                 "lon": float(ac["lon"]),
                 "altitude": alt_m,
                 "altitude_basis": basis,
-                "velocity": float(ac.get("gs", 0.0) or 0.0) * KT_TO_MPS,
-                "heading": float(ac.get("track", 0.0) or 0.0),
-                "vertical_rate": float(rate) * FPM_TO_MPS,
+                "velocity": float(ac["gs"]) * KT_TO_MPS,
+                "heading": float(ac["track"]),
+                "vertical_rate": float(rate) * FPM_TO_MPS if isinstance(rate, (int, float)) else 0.0,
+                "vertical_rate_reported": isinstance(rate, (int, float)),
                 "on_ground": False,
                 "source": "adsb.lol",
             })

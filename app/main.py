@@ -5,11 +5,13 @@ shared recording clock, and evidence checks that distinguish a supported
 location from an inconclusive ranked hypothesis.
 """
 
+import logging
 import math
 import os
-import shutil
 import tempfile
+import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -22,40 +24,74 @@ from pydantic import BaseModel, Field
 from app.adsb.flight_manager import FlightManager
 from app.adsb.opensky_client import OpenSkyClient
 from app.audio.discovery import DiscoverySettings, discover_file
+from app.config import Settings
 from app.physics.confidence import DecisionPolicy, decide_location
 from app.physics.doppler_engine import DopplerEngine
 from app.physics.flyover_fit import fit_flyover, kinematic_consistency
-from app.physics.grid_scorer import GridScorer
 from app.physics.matching import JointMatcher, MatchOptions, robust_rmse
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
+DEFAULT_SPEED_OF_SOUND = 343.2
+
+logger = logging.getLogger("doppler.api")
+settings = Settings.from_env()
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(APP_DIR, "static")
+SAMPLES_DIR = os.path.join(STATIC_DIR, "samples")
+AUDIO_EXTS = [".wav", ".mp3", ".ogg", ".flac", ".m4a"]
+UPLOAD_CHUNK = 1 << 20
+
+
+def upload_dir() -> str:
+    """Uploads live under the data dir, never under the publicly served static tree."""
+    os.makedirs(settings.upload_dir, exist_ok=True)
+    return settings.upload_dir
+
+
+def cleanup_uploads(now: Optional[float] = None) -> int:
+    """Delete uploaded files older than ``settings.upload_ttl_s``. Returns the number removed."""
+    d = settings.upload_dir
+    if not os.path.isdir(d):
+        return 0
+    now = time.time() if now is None else now
+    removed = 0
+    for name in os.listdir(d):
+        path = os.path.join(d, name)
+        try:
+            if os.path.isfile(path) and now - os.path.getmtime(path) > settings.upload_ttl_s:
+                os.remove(path)
+                removed += 1
+        except OSError:  # pragma: no cover - concurrent removal
+            pass
+    return removed
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    cleanup_uploads()
+    yield
+
 
 app = FastAPI(
     title="Doppler - Acoustic ADS-B Geolocator",
     description="Geolocates audio recordings by matching acoustic Doppler curves of passing airplanes with ADS-B flight tracking data.",
     version=APP_VERSION,
+    lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if settings.cors_origins:
+    # No cookies or auth headers are used, so credentials stay off (and "*" stays valid).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "HEAD"],
+        allow_headers=["*"],
+    )
 
-doppler_engine = DopplerEngine()
-grid_scorer = GridScorer(doppler_engine)
 opensky_client = OpenSkyClient()
-flight_manager = FlightManager(opensky_client)
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(APP_DIR, "static")
-UPLOAD_DIR = os.path.join(STATIC_DIR, "uploads")
-SAMPLES_DIR = os.path.join(STATIC_DIR, "samples")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-AUDIO_EXTS = [".wav", ".mp3", ".ogg", ".flac", ".m4a"]
+flight_manager = FlightManager(opensky_client, max_live_aircraft=settings.max_live_aircraft)
 
 
 class CurvePoint(BaseModel):
@@ -78,7 +114,8 @@ class GeolocateRequest(BaseModel):
     f0: Optional[float] = Field(None, description="Estimated rest frequency in Hz (legacy single-event mode)", ge=20.0, le=10000.0)
     traced_curve: Optional[List[CurvePoint]] = Field(None, description="Legacy single traced Doppler curve (audio time, s)")
     events: Optional[List[EventIn]] = Field(None, description="One or more Doppler events on the same recording clock")
-    scenario_id: Optional[str] = None
+    scenario_id: Optional[str] = Field(None, description="Explicitly use a curated demo scenario's trajectories")
+    demo: bool = Field(False, description="Allow demo data (nearby curated scenario or synthetic flights) when no real ADS-B data exists")
     flight_id: Optional[str] = None
     time_window_start: Optional[float] = None
     time_window_end: Optional[float] = None
@@ -89,6 +126,7 @@ class GeolocateRequest(BaseModel):
     recording_start_epoch: Optional[float] = Field(None, description="Trusted UTC epoch of the first audio sample")
     clock_tolerance_s: float = Field(2.0, ge=0.0, le=3600.0, description="Half-width of the trusted clock window")
     temperature_c: Optional[float] = Field(None, ge=-60.0, le=60.0, description="Air temperature for the speed of sound")
+    relative_humidity_pct: Optional[float] = Field(None, ge=0.0, le=100.0, description="Relative humidity for the speed of sound (default 50 % when temperature is given)")
     observer_alt_m: float = Field(0.0, description="Microphone height in the trajectory altitude datum")
     sensitivity: bool = Field(True, description="Run perturbation sensitivity analysis")
     max_rmse_hz: float = Field(3.0, gt=0.0, description="Decision threshold for per-event RMSE")
@@ -101,6 +139,7 @@ class FlightSearchRequest(BaseModel):
     center_lon: float
     radius_km: float = 10.0
     scenario_id: Optional[str] = None
+    demo: bool = False
     time_window_start: Optional[float] = None
     time_window_end: Optional[float] = None
 
@@ -108,7 +147,17 @@ class FlightSearchRequest(BaseModel):
 class FlyoverFitRequest(BaseModel):
     traced_curve: List[CurvePoint]
     temperature_c: Optional[float] = None
+    relative_humidity_pct: Optional[float] = Field(None, ge=0.0, le=100.0)
     loss_scale_hz: float = 2.0
+
+
+def speed_of_sound(temperature_c: Optional[float], relative_humidity_pct: Optional[float]) -> float:
+    """343.2 m/s (20 degC dry) unless weather is given; then Cramer (1993) with RH defaulting to 50 %."""
+    if temperature_c is None and relative_humidity_pct is None:
+        return DEFAULT_SPEED_OF_SOUND
+    t = 20.0 if temperature_c is None else temperature_c
+    rh = 50.0 if relative_humidity_pct is None else relative_humidity_pct
+    return DopplerEngine.calculate_speed_of_sound(t, rh / 100.0)
 
 
 @app.get("/api/health")
@@ -125,27 +174,35 @@ def list_scenarios():
     return scenarios
 
 
+def _find_flights(center_lat, center_lon, radius_km, t0, t1, scenario_id, demo) -> Dict[str, Any]:
+    try:
+        return flight_manager.find_flights(center_lat=center_lat, center_lon=center_lon, radius_km=radius_km,
+                                           time_window_start=t0, time_window_end=t1,
+                                           scenario_id=scenario_id or None, demo=demo)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Flight search failed")
+        raise HTTPException(status_code=500, detail="Internal error while retrieving flight data.")
+
+
 @app.post("/api/flights/search")
 def search_flights(req: FlightSearchRequest):
-    """Search or generate ADS-B flight trajectories in the requested spatial and temporal window."""
-    try:
-        flights = flight_manager.fetch_or_generate_flights(
-            center_lat=req.center_lat,
-            center_lon=req.center_lon,
-            radius_km=req.radius_km,
-            time_window_start=req.time_window_start,
-            time_window_end=req.time_window_end,
-            scenario_id=req.scenario_id,
-        )
-        return {"count": len(flights), "flights": flights}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """
+    Retrieve candidate ADS-B trajectories.  Demo data (curated or synthetic) is
+    returned only with an explicit ``scenario_id`` or ``demo=true``; otherwise
+    ``status`` is ``no_adsb_data`` when no real data exists.
+    """
+    found = _find_flights(req.center_lat, req.center_lon, req.radius_km, req.time_window_start,
+                          req.time_window_end, req.scenario_id, req.demo)
+    return {"count": len(found["flights"]), "flights": found["flights"], "status": found["status"],
+            "data_source": found["data_source"], "notes": found["notes"], "limitations": found["limitations"]}
 
 
 @app.post("/api/flyover/fit")
 def flyover_fit(req: FlyoverFitRequest):
     """Fit a constant-velocity flyover model: rest frequency, speed, CPA slant range and CPA time."""
-    c = DopplerEngine.calculate_speed_of_sound(req.temperature_c) if req.temperature_c is not None else 343.2
+    c = speed_of_sound(req.temperature_c, req.relative_humidity_pct)
     try:
         return fit_flyover([p.time for p in req.traced_curve], [p.freq for p in req.traced_curve],
                            speed_of_sound=c, loss_scale_hz=req.loss_scale_hz)
@@ -154,7 +211,7 @@ def flyover_fit(req: FlyoverFitRequest):
 
 
 @app.post("/api/audio/discover")
-async def discover_audio(
+def discover_audio(
     file: Optional[UploadFile] = File(None),
     sample_id: Optional[str] = Form(None),
     saved_as: Optional[str] = Form(None),
@@ -164,6 +221,9 @@ async def discover_audio(
     """
     Automatically detect moving Doppler ridges in a recording and group harmonics.
     Provide an uploaded file, a curated ``sample_id``, or a previously uploaded ``saved_as`` name.
+
+    Declared as a sync endpoint so FastAPI runs the CPU-heavy analysis in its
+    threadpool instead of blocking the event loop.
     """
     settings = DiscoverySettings()
     if fmin_hz:
@@ -178,13 +238,13 @@ async def discover_audio(
             if ext not in AUDIO_EXTS:
                 raise HTTPException(status_code=400, detail="Unsupported audio format.")
             fd, tmp_path = tempfile.mkstemp(suffix=ext)
-            with os.fdopen(fd, "wb") as out:
-                shutil.copyfileobj(file.file, out)
+            os.close(fd)
+            _save_upload(file, tmp_path)
             path = tmp_path
         elif sample_id:
             path = _safe_child(SAMPLES_DIR, f"{sample_id}.wav")
         elif saved_as:
-            path = _safe_child(UPLOAD_DIR, saved_as)
+            path = _safe_child(upload_dir(), saved_as)
         else:
             raise HTTPException(status_code=400, detail="Provide file, sample_id or saved_as.")
         if not os.path.isfile(path):
@@ -196,6 +256,27 @@ async def discover_audio(
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+def _save_upload(file: UploadFile, dest_path: str) -> int:
+    """Stream an upload to disk, enforcing ``settings.max_upload_bytes`` (HTTP 413 when exceeded)."""
+    total = 0
+    try:
+        with open(dest_path, "wb") as out:
+            while True:
+                chunk = file.file.read(UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > settings.max_upload_bytes:
+                    raise HTTPException(status_code=413, detail=(
+                        f"Upload exceeds the {settings.max_upload_bytes // (1024 * 1024)} MiB limit."))
+                out.write(chunk)
+    except BaseException:
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        raise
+    return total
 
 
 def _safe_child(base: str, name: str) -> str:
@@ -213,21 +294,22 @@ def geolocate(req: GeolocateRequest):
     run sensitivity checks and return a supported / inconclusive decision.
     """
     raw_events = _collect_events(req)
-    flights = flight_manager.fetch_or_generate_flights(
-        center_lat=req.center_lat,
-        center_lon=req.center_lon,
-        radius_km=req.radius_km,
-        time_window_start=req.time_window_start,
-        time_window_end=req.time_window_end,
-        scenario_id=req.scenario_id,
-    )
+    t0, t1 = req.time_window_start, req.time_window_end
+    if t0 is None and t1 is None and req.recording_start_epoch is not None:
+        # A trusted recording clock defines the ADS-B window to query.
+        t0, t1 = _recording_window(req, raw_events)
+    found = _find_flights(req.center_lat, req.center_lon, req.radius_km, t0, t1, req.scenario_id, req.demo)
+    flights = found["flights"]
+    provenance = {"data_source": found["data_source"], "data_notes": found["notes"],
+                  "data_limitations": found["limitations"]}
     if not flights:
-        raise HTTPException(status_code=404, detail="No flight trajectories found in the specified spatial/temporal window.")
+        decision = decide_location({"status": "no_adsb_data"}, n_events=len(raw_events))
+        return {"status": "no_adsb_data", "message": found.get("message"), "decision": decision, **provenance}
     if req.flight_id:
         target = [f for f in flights if f.get("flight_id") == req.flight_id]
         flights = target or flights
 
-    c = DopplerEngine.calculate_speed_of_sound(req.temperature_c) if req.temperature_c is not None else 343.2
+    c = speed_of_sound(req.temperature_c, req.relative_humidity_pct)
     opts = MatchOptions(
         speed_of_sound=c, fit_f0=req.fit_f0, drift_fraction=req.drift_fraction,
         loss_scale_hz=req.loss_scale_hz, observer_alt_m=req.observer_alt_m,
@@ -250,9 +332,18 @@ def geolocate(req: GeolocateRequest):
     flyover_fits = _flyover_fits(raw_events, c)
     if res.get("status") != "ok":
         return {"status": "no_match", "message": res.get("message"), "decision": decision,
-                "flyover_fits": flyover_fits, "evaluated_flights": _flight_summaries(flights, [], flyover_fits)}
+                "flyover_fits": flyover_fits, "evaluated_flights": _flight_summaries(flights, [], flyover_fits),
+                **provenance}
 
-    return _format_result(matcher, res, decision, flights, flyover_fits, opts)
+    out = _format_result(matcher, res, decision, flights, flyover_fits, opts)
+    out.update(provenance)
+    return out
+
+
+def _recording_window(req: GeolocateRequest, raw_events: List[Dict[str, Any]]):
+    t_end = max(p["time"] for ev in raw_events for p in ev["traced_curve"])
+    return (req.recording_start_epoch - req.clock_tolerance_s - 60.0,
+            req.recording_start_epoch + req.clock_tolerance_s + t_end + 60.0)
 
 
 def _collect_events(req: GeolocateRequest) -> List[Dict[str, Any]]:
@@ -299,6 +390,7 @@ def _flight_summaries(flights, diagnostics, flyover_fits) -> List[Dict[str, Any]
         kin = {eid: kinematic_consistency(fit, f) for eid, fit in flyover_fits.items()}
         out.append({
             "flight_id": fid, "callsign": f.get("callsign"), "aircraft_type": f.get("aircraft_type"),
+            "data_source": f.get("data_source"), "altitude_basis": f.get("altitude_basis"),
             "matched_events": matched, "kinematic_consistency": kin,
         })
     return out
@@ -354,12 +446,14 @@ def _format_result(matcher: JointMatcher, res, decision, flights, flyover_fits, 
     matched_flight_ids = {d["flight_id"] for d in diags if d.get("matched")}
     flight_traj = {
         "flight_id": pk.flight_id, "callsign": pk.raw.get("callsign"), "aircraft_type": pk.raw.get("aircraft_type"),
+        "data_source": pk.raw.get("data_source"),
         "latitudes": pk.raw.get("latitudes"), "longitudes": pk.raw.get("longitudes"),
         "altitudes": pk.raw.get("altitudes"), "speeds": pk.raw.get("speeds"),
     }
     return {
         "status": "success",
-        "best_flight": {"flight_id": pk.flight_id, "callsign": pk.raw.get("callsign"), "aircraft_type": pk.raw.get("aircraft_type")},
+        "best_flight": {"flight_id": pk.flight_id, "callsign": pk.raw.get("callsign"), "aircraft_type": pk.raw.get("aircraft_type"),
+                        "data_source": pk.raw.get("data_source")},
         "best_location": {
             "lat": round(lat, 6), "lon": round(lon, 6),
             "score": round(score_of(res["robust_rmse_hz"]), 2),
@@ -379,6 +473,7 @@ def _format_result(matcher: JointMatcher, res, decision, flights, flyover_fits, 
         "flight_trajectory": flight_traj,
         "matched_flights": [
             {"flight_id": m.flight_id, "callsign": m.raw.get("callsign"), "aircraft_type": m.raw.get("aircraft_type"),
+             "data_source": m.raw.get("data_source"),
              "latitudes": m.raw.get("latitudes"), "longitudes": m.raw.get("longitudes")}
             for m in matcher.models if m.flight_id in matched_flight_ids
         ],
@@ -391,23 +486,34 @@ def _format_result(matcher: JointMatcher, res, decision, flights, flyover_fits, 
 
 
 @app.post("/api/audio/upload")
-async def upload_audio(file: UploadFile = File(...)):
-    """Upload custom MP3/WAV audio file for analysis."""
+def upload_audio(file: UploadFile = File(...)):
+    """
+    Upload a recording for server-side analysis.  Files are stored outside the
+    static tree, size-capped, and deleted after ``DOPPLER_UPLOAD_TTL_S``.
+    """
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in AUDIO_EXTS:
         raise HTTPException(status_code=400, detail="Only audio files (WAV, MP3, OGG, FLAC, M4A) are supported.")
-
+    cleanup_uploads()
     unique_filename = f"{uuid.uuid4().hex}{ext}"
-    dest_path = os.path.join(UPLOAD_DIR, unique_filename)
-    with open(dest_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
+    dest_path = os.path.join(upload_dir(), unique_filename)
+    size = _save_upload(file, dest_path)
     return {
         "filename": file.filename,
         "saved_as": unique_filename,
-        "url": f"/static/uploads/{unique_filename}",
-        "size_bytes": os.path.getsize(dest_path),
+        "url": f"/api/audio/uploads/{unique_filename}",
+        "size_bytes": size,
+        "expires_in_s": settings.upload_ttl_s,
     }
+
+
+@app.get("/api/audio/uploads/{name}")
+def get_uploaded_audio(name: str):
+    """Serve a previously uploaded file by its unguessable ``saved_as`` name (until it expires)."""
+    path = _safe_child(upload_dir(), name)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Upload not found or expired.")
+    return FileResponse(path)
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

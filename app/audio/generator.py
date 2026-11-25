@@ -4,8 +4,6 @@ Synthesizes WAV files with realistic Doppler-shifted engine tones, harmonics,
 inverse-square amplitude decay, and atmospheric sound propagation.
 """
 
-import math
-import struct
 import wave
 import os
 from typing import Any, Dict, List, Tuple

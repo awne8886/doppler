@@ -53,14 +53,13 @@ class ApiClient {
             }
         }
 
-        // Client-side flight retrieval
-        const flights = window.clientFlights.fetchOrGenerateFlights(
-            params.center_lat,
-            params.center_lon,
-            params.radius_km,
-            params.scenario_id
+        // Client-side flight retrieval (demo data only when explicitly requested)
+        const found = window.clientFlights.findFlights(
+            params.center_lat, params.center_lon, params.radius_km, params.scenario_id,
+            { demo: !!params.demo, timeWindowStart: params.time_window_start }
         );
-        return { count: flights.length, flights };
+        return { count: found.flights.length, flights: found.flights, status: found.status,
+            data_source: found.data_source, notes: found.notes, limitations: found.limitations };
     }
 
     async geolocateObserver(payload, onProgress = null) {
@@ -86,16 +85,24 @@ class ApiClient {
     /** Full joint-matching pipeline in the browser (GitHub Pages mode). */
     async clientGeolocate(payload, onProgress) {
         const DA = window.DopplerAnalysis;
-        const flights = window.clientFlights.fetchOrGenerateFlights(
-            payload.center_lat, payload.center_lon, payload.radius_km, payload.scenario_id
-        );
-        if (!flights || flights.length === 0) throw new Error('No flight trajectory found.');
-
         const events = (payload.events && payload.events.length)
             ? payload.events
             : [{ id: 'E1', traced_curve: payload.traced_curve, f0: payload.f0 }];
-        const c = payload.temperature_c != null
-            ? 331.3 * Math.sqrt((payload.temperature_c + 273.15) / 273.15) : 343.2;
+        const found = window.clientFlights.findFlights(
+            payload.center_lat, payload.center_lon, payload.radius_km, payload.scenario_id,
+            { demo: !!payload.demo, timeWindowStart: payload.time_window_start }
+        );
+        let flights = found.flights;
+        const provenance = { data_source: found.data_source, data_notes: found.notes, data_limitations: found.limitations };
+        if (!flights || flights.length === 0) {
+            return { status: 'no_adsb_data', message: found.message, mode: 'client_physics',
+                decision: DA.decideLocation({ status: 'no_adsb_data' }, {}, events.length), ...provenance };
+        }
+        if (payload.flight_id) {
+            const target = flights.filter(f => f.flight_id === payload.flight_id);
+            if (target.length) flights = target;
+        }
+        const c = DA.speedOfSoundFor(payload.temperature_c, payload.relative_humidity_pct);
         const opts = {
             speed_of_sound: c,
             fit_f0: payload.fit_f0 !== false,
@@ -125,7 +132,7 @@ class ApiClient {
             try { flyoverFits[ev.id] = DA.FlyoverFit.fit(pts.map(p => p.time), pts.map(p => p.freq), c); } catch (e) { /* skip */ }
         }
         if (res.status !== 'ok') {
-            return { status: 'no_match', message: res.message, decision, flyover_fits: flyoverFits, mode: 'client_physics' };
+            return { status: 'no_match', message: res.message, decision, flyover_fits: flyoverFits, mode: 'client_physics', ...provenance };
         }
 
         const sigma = 3 * opts.loss_scale_hz;
@@ -154,7 +161,8 @@ class ApiClient {
         return {
             status: 'success',
             mode: 'client_physics',
-            best_flight: { flight_id: pk.flight_id, callsign: pk.raw.callsign, aircraft_type: pk.raw.aircraft_type },
+            ...provenance,
+            best_flight: { flight_id: pk.flight_id, callsign: pk.raw.callsign, aircraft_type: pk.raw.aircraft_type, data_source: pk.raw.data_source },
             best_location: {
                 lat: +bg.lat.toFixed(6), lon: +bg.lon.toFixed(6),
                 score: +scoreOf(res.robust_rmse_hz).toFixed(2),
@@ -176,15 +184,16 @@ class ApiClient {
             curve_comparison: comparison,
             flight_trajectory: {
                 flight_id: pk.flight_id, callsign: pk.raw.callsign, aircraft_type: pk.raw.aircraft_type,
-                latitudes: pk.raw.latitudes, longitudes: pk.raw.longitudes, altitudes: pk.raw.altitudes, speeds: pk.raw.speeds,
+                data_source: pk.raw.data_source, latitudes: pk.raw.latitudes, longitudes: pk.raw.longitudes, altitudes: pk.raw.altitudes, speeds: pk.raw.speeds,
             },
             matched_flights: matcher.models.filter(m => matchedIds.has(m.flight_id)).map(m => ({
                 flight_id: m.flight_id, callsign: m.raw.callsign, aircraft_type: m.raw.aircraft_type,
-                latitudes: m.raw.latitudes, longitudes: m.raw.longitudes,
+                data_source: m.raw.data_source, latitudes: m.raw.latitudes, longitudes: m.raw.longitudes,
             })),
             f0_hz: primary.f0_hz,
             evaluated_flights: flights.map(f => ({
                 flight_id: f.flight_id, callsign: f.callsign, aircraft_type: f.aircraft_type,
+                data_source: f.data_source, altitude_basis: f.altitude_basis,
                 matched_events: diags.filter(d => d.flight_id === f.flight_id && d.matched).map(d => d.event_id),
             })),
             grid_resolution: payload.grid_resolution || 21,

@@ -2,6 +2,7 @@
  * Main Application Controller for Doppler Acoustic Aircraft Geolocator
  */
 document.addEventListener('DOMContentLoaded', async () => {
+    const { escapeHtml, fmtNum } = window.DopplerUtil;
     const playBtn = document.getElementById('playBtn');
     const playIcon = document.getElementById('playIcon');
     const stopBtn = document.getElementById('stopBtn');
@@ -102,37 +103,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ? `optional, e.g. ${new Date(scenario.recording_start_epoch * 1000).toISOString()}`
                 : 'ISO 8601 or Unix epoch';
             resetResults();
-            // Detect real Doppler ridges in the recording (falls back to a synthetic seed).
-            const found = await runAutoDetect(true);
-            if (!found && flightResp && flightResp.flights && flightResp.flights.length > 0) {
-                autoSeedInitialTrace(flightResp.flights[0], f0);
-            }
+            // Detect real Doppler ridges in the recording. If none are found the user
+            // traces manually; no synthetic trace is ever substituted.
+            await runAutoDetect(true);
         } catch (err) {
             alert(`Error loading scenario: ${err.message}`);
         } finally {
             hideLoading();
         }
-    }
-
-    // Auto-seed trace points along the ground-truth curve for immediate demo
-    function autoSeedInitialTrace(flight, f0) {
-        if (!window.audioAnalyzer.duration) return;
-        const dur = window.audioAnalyzer.duration;
-        const cpaTime = dur / 2.0;
-
-        // Realistic S-curve equation: f(t) = f0 - delta * tanh((t - t_cpa) / tau)
-        const delta = (flight.speeds ? flight.speeds[0] : 170.0) / 343.2 * f0 * 0.9;
-        const tau = 4.2;
-
-        const points = [];
-        const nPts = 16;
-        for (let i = 0; i < nPts; i++) {
-            const t = 2.0 + (i / (nPts - 1)) * (dur - 4.0);
-            // S-curve frequency drop
-            const f = f0 - delta * Math.tanh((t - cpaTime) / tau);
-            points.push({ time: t, freq: f });
-        }
-        window.tracer.loadSynthesizedPoints(points, f0);
     }
 
     async function runAutoDetect(quiet = false) {
@@ -287,15 +265,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                 center_lon: lon,
                 radius_km: r,
                 scenario_id: currentScenarioId,
+                demo: document.getElementById('demoCheck').checked,
             });
 
             if (resp && resp.flights && resp.flights.length > 0) {
                 window.mapView.displayFlightTrajectories(resp.flights);
                 document.getElementById('mapOverlayBadge').innerHTML = `
-                    <span class="status-dot"></span> Found ${resp.count} flight(s) in sector
+                    <span class="status-dot"></span> Found ${fmtNum(resp.count)} flight(s) in sector
+                    (${escapeHtml(resp.data_source || 'unknown source')})
                 `;
             } else {
-                alert('No flight trajectories found in this sector.');
+                alert((resp && resp.notes && resp.notes.length) ? resp.notes[resp.notes.length - 1] : 'No flight trajectories found in this sector.');
             }
         } catch (e) {
             alert(`Flight query error: ${e.message}`);
@@ -320,6 +300,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         let clock = null;
         try { clock = parseClock(clockInput.value); } catch (e) { alert(e.message); return; }
         const tempVal = document.getElementById('tempInput').value;
+        const humidityVal = document.getElementById('humidityInput').value;
 
         const lat = parseFloat(document.getElementById('centerLat').value);
         const lon = parseFloat(document.getElementById('centerLon').value);
@@ -336,6 +317,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 f0: fitF0 ? undefined : f0,
                 fit_f0: fitF0,
                 scenario_id: currentScenarioId,
+                demo: document.getElementById('demoCheck').checked,
                 grid_resolution: gridRes,
                 sensitivity: document.getElementById('sensitivityCheck').checked,
             };
@@ -344,6 +326,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 payload.clock_tolerance_s = parseFloat(document.getElementById('clockTolInput').value) || 0;
             }
             if (tempVal !== '') payload.temperature_c = parseFloat(tempVal);
+            if (humidityVal !== '') payload.relative_humidity_pct = parseFloat(humidityVal);
 
             const result = await window.apiClient.geolocateObserver(payload, (stage, frac) => {
                 loadingMessage.textContent = `Client physics: ${stage} ${Math.round(frac * 100)}%`;
@@ -372,19 +355,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         const rows = (result.events || []).map(e => {
             const fit = (result.flyover_fits || {})[e.event_id];
             const bad = (v, lim) => (v > lim ? ' class="bad"' : '');
+            const pct = (v, d) => (v != null ? `${fmtNum(v * 100, d)}%` : '--');
             return `<tr>
-                <td>${e.event_id}</td><td>${e.group_id || ''}</td>
-                <td>${e.matched ? (e.callsign || e.flight_id) : '<span class="bad">unmatched</span>'}</td>
-                <td>${e.f0_hz != null ? e.f0_hz.toFixed(1) : '--'}</td>
-                <td${bad(e.rmse_hz, 3)}>${e.rmse_hz != null ? e.rmse_hz.toFixed(2) : '--'}</td>
-                <td${bad(e.outlier_fraction, 0.25)}>${e.outlier_fraction != null ? (e.outlier_fraction * 100).toFixed(0) + '%' : '--'}</td>
-                <td${e.support_fraction < 0.95 ? ' class="bad"' : ''}>${e.support_fraction != null ? (e.support_fraction * 100).toFixed(0) + '%' : '--'}</td>
-                <td${e.drift_at_bound ? ' class="bad"' : ''}>${e.drift_fraction != null ? (e.drift_fraction * 100).toFixed(2) + '%' : '--'}</td>
-                <td>${fit ? `${Math.round(fit.speed_mps)} m/s, ${(fit.cpa_slant_m / 1000).toFixed(2)} km` : '--'}</td>
+                <td>${escapeHtml(e.event_id)}</td><td>${escapeHtml(e.group_id || '')}</td>
+                <td>${e.matched ? escapeHtml(e.callsign || e.flight_id) : '<span class="bad">unmatched</span>'}</td>
+                <td>${fmtNum(e.f0_hz, 1)}</td>
+                <td${bad(e.rmse_hz, 3)}>${fmtNum(e.rmse_hz, 2)}</td>
+                <td${bad(e.outlier_fraction, 0.25)}>${pct(e.outlier_fraction, 0)}</td>
+                <td${e.support_fraction < 0.95 ? ' class="bad"' : ''}>${pct(e.support_fraction, 0)}</td>
+                <td${e.drift_at_bound ? ' class="bad"' : ''}>${pct(e.drift_fraction, 2)}</td>
+                <td>${fit ? `${fmtNum(fit.speed_mps)} m/s, ${fmtNum(fit.cpa_slant_m / 1000, 2)} km` : '--'}</td>
             </tr>`;
         }).join('');
         const checks = ((result.decision && result.decision.checks) || []).map(c =>
-            `<span class="check-pill ${c.passed ? 'pass' : 'fail'}">${c.passed ? '\u2713' : '\u2717'} ${c.check.replace(/_/g, ' ')}</span>`).join('');
+            `<span class="check-pill ${c.passed ? 'pass' : 'fail'}">${c.passed ? '\u2713' : '\u2717'} ${escapeHtml(String(c.check).replace(/_/g, ' '))}</span>`).join('');
         host.innerHTML = `
             <table>
                 <thead><tr><th>Event</th><th>Group</th><th>Flight</th><th>f&#8320; Hz</th><th>RMSE Hz</th><th>Outliers</th><th>Support</th><th>Drift</th><th>Flyover fit</th></tr></thead>
@@ -396,7 +380,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function displayGeolocationResults(result) {
         if (result.status !== 'success') {
             displayDecision(result.decision);
-            document.getElementById('eventResults').innerHTML = `<p class="small-text">${result.message || 'No match.'}</p>`;
+            document.getElementById('eventResults').innerHTML = `<p class="small-text">${escapeHtml(result.message || 'No match.')}</p>`;
             return;
         }
         const best = result.best_location;
@@ -433,7 +417,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const dotColor = supported ? '#10b981' : '#f59e0b';
         document.getElementById('mapOverlayBadge').innerHTML = `
             <span class="status-dot" style="background:${dotColor}; box-shadow:0 0 8px ${dotColor};"></span>
-            ${supported ? 'SUPPORTED' : 'INCONCLUSIVE'}: ${best.lat.toFixed(4)}, ${best.lon.toFixed(4)}
+            ${supported ? 'SUPPORTED' : 'INCONCLUSIVE'}: ${fmtNum(best.lat, 4)}, ${fmtNum(best.lon, 4)}
         `;
 
         if (window.innerWidth < 1200) {

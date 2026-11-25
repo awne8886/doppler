@@ -2,6 +2,9 @@
  * Leaflet.js Mapping & Acoustic Heatmap Visualization Engine.
  * Renders spatial heatmaps, flight trajectories, and comparison curves.
  */
+const esc = (v) => window.DopplerUtil.escapeHtml(v);
+const num = (v, d = 0) => window.DopplerUtil.fmtNum(v, d);
+
 class MapView {
     constructor() {
         this.map = null;
@@ -154,10 +157,10 @@ class MapView {
             circle.bindPopup(`
                 <div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
                     <strong>Candidate Acoustic Observer</strong><br>
-                    <strong>Coords:</strong> ${pt.lat.toFixed(5)}, ${pt.lon.toFixed(5)}<br>
-                    <strong>Fit Score:</strong> <span style="color:#d97706; font-weight:bold;">${pt.score}%</span><br>
-                    <strong>Robust RMSE:</strong> ${pt.rmse} Hz<br>
-                    <strong>Matched Flight:</strong> ${flightInfo.callsign || flightInfo.flight_id}
+                    <strong>Coords:</strong> ${num(pt.lat, 5)}, ${num(pt.lon, 5)}<br>
+                    <strong>Fit Score:</strong> <span style="color:#d97706; font-weight:bold;">${num(pt.score, 2)}%</span><br>
+                    <strong>Robust RMSE:</strong> ${num(pt.rmse, 2)} Hz<br>
+                    <strong>Matched Flight:</strong> ${esc(flightInfo.callsign || flightInfo.flight_id)}
                 </div>
             `);
             this.gridMarkersLayer.addLayer(circle);
@@ -173,9 +176,9 @@ class MapView {
             }).bindPopup(`
                 <div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
                     <strong>${tie ? 'Near-tied alternative' : 'Competing local optimum'}</strong><br>
-                    ${alt.lat.toFixed(5)}, ${alt.lon.toFixed(5)}<br>
-                    Robust RMSE: ${alt.robust_rmse_hz} Hz<br>
-                    ${(alt.distance_from_best_m / 1000).toFixed(2)} km from best
+                    ${num(alt.lat, 5)}, ${num(alt.lon, 5)}<br>
+                    Robust RMSE: ${num(alt.robust_rmse_hz, 3)} Hz<br>
+                    ${num(alt.distance_from_best_m / 1000, 2)} km from best
                 </div>`).addTo(this.altLayer);
         }
         if (bestLocation && bestLocation.uncertainty_radius_m) {
@@ -183,7 +186,7 @@ class MapView {
                 radius: Math.max(10, bestLocation.uncertainty_radius_m),
                 color: decision && decision.status === 'supported' ? '#10b981' : '#f59e0b',
                 weight: 1.5, dashArray: '4,4', fillOpacity: 0.08,
-            }).bindTooltip(`Sensitivity radius ${Math.round(bestLocation.uncertainty_radius_m)} m (engineering envelope, uncalibrated)`).addTo(this.altLayer);
+            }).bindTooltip(`Sensitivity radius ${num(bestLocation.uncertainty_radius_m)} m (engineering envelope, uncalibrated)`).addTo(this.altLayer);
         }
 
         // 4. Mark Hottest Point (Estimated microphone location)
@@ -222,10 +225,10 @@ class MapView {
                 .bindPopup(`
                     <div style="font-family:'Space Grotesk', sans-serif; font-size:13px; color:#111;">
                         <h4 style="color:#e11d48; margin-bottom:4px;">&#127908; ${decision && decision.status === 'supported' ? 'SUPPORTED MICROPHONE LOCATION' : 'BEST-RANKED HYPOTHESIS (INCONCLUSIVE)'}</h4>
-                        <strong>Coords:</strong> ${bestLocation.lat.toFixed(6)}, ${bestLocation.lon.toFixed(6)}<br>
-                        <strong>Fit Score:</strong> ${bestLocation.score}%<br>
-                        <strong>Worst Event RMSE:</strong> ${bestLocation.rmse_hz} Hz<br>
-                        <strong>Matched Flight:</strong> ${flightInfo.callsign || flightInfo.flight_id} (${flightInfo.aircraft_type})
+                        <strong>Coords:</strong> ${num(bestLocation.lat, 6)}, ${num(bestLocation.lon, 6)}<br>
+                        <strong>Fit Score:</strong> ${num(bestLocation.score, 2)}%<br>
+                        <strong>Worst Event RMSE:</strong> ${num(bestLocation.rmse_hz, 3)} Hz<br>
+                        <strong>Matched Flight:</strong> ${esc(flightInfo.callsign || flightInfo.flight_id)} (${esc(flightInfo.aircraft_type || 'unknown type')})
                     </div>
                 `)
                 .openPopup();
@@ -239,6 +242,7 @@ class MapView {
     }
 
     displayFlightTrajectory(trajectory, color = '#f59e0b', clear = true) {
+        color = /^#[0-9a-fA-F]{3,8}$/.test(color) ? color : '#f59e0b';
         if (clear) this.flightLayer.clearLayers();
         if (!trajectory || !trajectory.latitudes || trajectory.latitudes.length === 0) return;
 
@@ -281,10 +285,12 @@ class MapView {
         const planeMarker = L.marker(endPoint, { icon: planeIcon }).addTo(this.flightLayer);
         planeMarker.bindPopup(`
             <div style="font-family:'JetBrains Mono', monospace; font-size:12px; color:#111;">
-                <strong>${trajectory.callsign || trajectory.flight_id}</strong><br>
-                ${trajectory.aircraft_type || 'Aircraft'}<br>
-                <strong>Speed:</strong> ${trajectory.speeds ? trajectory.speeds[0] : 170} m/s<br>
-                <strong>Altitude:</strong> ${trajectory.altitudes ? trajectory.altitudes[0] : 1200} m
+                <strong>${esc(trajectory.callsign || trajectory.flight_id)}</strong><br>
+                ${esc(trajectory.aircraft_type || 'Aircraft')}<br>
+                <strong>Speed:</strong> ${trajectory.speeds && trajectory.speeds.length ? `${num(trajectory.speeds[0])} m/s` : 'not reported'}<br>
+                <strong>Altitude:</strong> ${trajectory.altitudes && trajectory.altitudes.length ? `${num(trajectory.altitudes[0])} m` : 'not reported'}
+                ${trajectory.altitude_basis ? `(${esc(trajectory.altitude_basis)})` : ''}<br>
+                <strong>Source:</strong> ${esc(trajectory.data_source || 'unknown')}
             </div>
         `);
     }

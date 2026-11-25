@@ -1,8 +1,8 @@
 """
-Unit tests for Acoustic Doppler Physics Engine and Grid Scorer.
+Unit tests for the acoustic Doppler physics engine and the joint matcher's
+single-flyover recovery (ported from the removed legacy GridScorer test).
 """
 
-import math
 import os
 import sys
 import numpy as np
@@ -10,8 +10,8 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.physics.doppler_engine import DopplerEngine
-from app.physics.grid_scorer import GridScorer
-from app.adsb.sample_flights import generate_linear_flight_trajectory
+from app.physics.matching import JointMatcher, MatchOptions
+from app.adsb.sample_flights import generate_linear_flight_trajectory, trajectory_start_for_cpa
 
 
 def test_doppler_equation_and_radial_velocity():
@@ -75,68 +75,70 @@ def test_geodetic_cartesian_roundtrip():
     assert np.isclose(alt_back[0], test_alt, atol=1e-2)
 
 
-def test_grid_scorer_ground_truth_recovery():
+def _mirror_about_track(traj, ref_lat, ref_lon):
+    """Mirror image of the reference point (local origin) about the straight ground track."""
     engine = DopplerEngine()
-    scorer = GridScorer(engine)
+    x, y, _ = engine.geodetic_to_cartesian(np.array(traj["latitudes"]), np.array(traj["longitudes"]),
+                                           np.zeros(len(traj["latitudes"])), ref_lat, ref_lon, 0.0)
+    p0 = np.array([x[0], y[0]])
+    u = np.array([x[-1] - x[0], y[-1] - y[0]])
+    u /= np.linalg.norm(u)
+    foot = p0 + u * np.dot(-p0, u)  # projection of the origin onto the track
+    return 2.0 * foot  # reflection of the origin
 
-    ground_truth_mic = (37.5585, -122.2711)
+
+def test_joint_matcher_single_flyover_recovery():
+    """A clean single flyover is recovered up to its mirror ambiguity, with a near-perfect fit."""
+    engine = DopplerEngine()
+    mic = (37.5585, -122.2711)
     f0 = 800.0
-
+    start = trajectory_start_for_cpa(mic, 315.0, 170.0, 900.0, 30.0)
     traj = generate_linear_flight_trajectory(
-        flight_id="TEST01",
-        callsign="TEST01",
-        aircraft_type="Test Jet",
-        start_lat=37.5100,
-        start_lon=37.5100,
-        start_alt=1200.0,
-        heading_deg=315.0,
-        speed_mps=170.0,
-        vertical_rate_mps=0.0,
-        duration_sec=60.0,
-        start_epoch=1700000000.0,
-        f0_target=f0,
-        ground_truth_obs=ground_truth_mic,
+        flight_id="TEST01", callsign="TEST01", aircraft_type="Test Jet",
+        start_lat=start[0], start_lon=start[1], start_alt=1200.0, heading_deg=315.0,
+        speed_mps=170.0, vertical_rate_mps=0.0, duration_sec=60.0, start_epoch=1700000000.0,
+        f0_target=f0, ground_truth_obs=mic,
     )
 
-    # Compute observed Doppler points at ground truth observer
     t_emit = np.array(traj["timestamps"]) - traj["timestamps"][0]
     px, py, pz = engine.geodetic_to_cartesian(
-        np.array(traj["latitudes"]), np.array(traj["longitudes"]), np.array(traj["altitudes"]),
-        ground_truth_mic[0], ground_truth_mic[1], 0.0
+        np.array(traj["latitudes"]), np.array(traj["longitudes"]), np.array(traj["altitudes"]), mic[0], mic[1], 0.0
     )
     plane_pos = np.stack([px, py, pz], axis=1)
-    vx = np.gradient(px, t_emit)
-    vy = np.gradient(py, t_emit)
-    vz = np.gradient(pz, t_emit)
-    plane_vel = np.stack([vx, vy, vz], axis=1)
-
-    t_obs, f_obs = engine.compute_doppler_curve(t_emit, plane_pos, plane_vel, np.array([0., 0., 0.]), f0)
-
-    # Sample traced curve
+    plane_vel = np.stack([np.gradient(px, t_emit), np.gradient(py, t_emit), np.gradient(pz, t_emit)], axis=1)
+    t_obs, f_obs = engine.compute_doppler_curve(t_emit, plane_pos, plane_vel, np.array([0.0, 0.0, 0.0]), f0)
     t_samples = np.linspace(t_obs[10], t_obs[-10], 20)
     f_samples = np.interp(t_samples, t_obs, f_obs)
-    traced_curve = [{"time": float(t - t_samples[0]), "freq": float(f)} for t, f in zip(t_samples, f_samples)]
+    events = [{"id": "E1", "traced_curve": [{"time": float(t - t_samples[0]), "freq": float(f)}
+                                            for t, f in zip(t_samples, f_samples)]}]
 
-    eval_result = scorer.evaluate_grid(
-        center_lat=ground_truth_mic[0],
-        center_lon=ground_truth_mic[1],
-        radius_km=10.0,
-        flight_trajectory=traj,
-        traced_curve=traced_curve,
-        f0=f0,
-        grid_resolution=21,
-    )
+    m = JointMatcher([traj], events, mic[0], mic[1], MatchOptions())
+    res = m.run(10.0, 21, sensitivity=False)
+    assert res["status"] == "ok"
+    assert res["robust_rmse_hz"] < 0.5
+    assert int(np.sum(m.grid["inside"])) > 100
+    d = res["diagnostics"][0]
+    assert d["matched"] and d["rmse_hz"] < 1.0 and abs(d["f0_hz"] - f0) < 2.0
+    assert len(d["times"]) == len(events[0]["traced_curve"])
+    best = np.array([res["best"]["x"], res["best"]["y"]])
+    mirror = _mirror_about_track(traj, mic[0], mic[1])
+    # Single flyover: either the true position or its mirror image about the track.
+    assert min(np.linalg.norm(best), np.linalg.norm(best - mirror)) < 150.0
 
-    best_loc = eval_result["best_location"]
-    # The grid point with smallest error should have high match score (> 95%) and low RMSE
-    assert best_loc["score"] > 95.0
-    assert best_loc["rmse_hz"] < 5.0
-    assert len(eval_result["heatmap"]) > 100
-    assert len(eval_result["curve_comparison"]) == len(traced_curve)
+
+def test_speed_of_sound_humidity():
+    c = DopplerEngine.calculate_speed_of_sound
+    assert abs(c(0.0, 0.0) - 331.45) < 0.05  # dry air at 0 degC
+    assert abs(c(20.0, 0.0) - 343.36) < 0.05
+    # Humidity raises the speed of sound; the effect grows with temperature.
+    assert 0.5 < c(20.0, 0.5) - c(20.0, 0.0) < 0.8
+    assert c(30.0, 1.0) - c(30.0, 0.0) > c(10.0, 1.0) - c(10.0, 0.0) > 0.0
+    assert abs(c(20.0, 50.0) - c(20.0, 0.5)) < 1e-9  # percent accepted
 
 
 if __name__ == "__main__":
     test_doppler_equation_and_radial_velocity()
     test_geodetic_cartesian_roundtrip()
-    test_grid_scorer_ground_truth_recovery()
+    test_joint_matcher_single_flyover_recovery()
+    test_speed_of_sound_humidity()
     print("All physics unit tests passed!")

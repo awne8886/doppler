@@ -20,7 +20,7 @@ from app.main import app
 from app.physics.confidence import decide_location
 from app.physics.doppler_engine import DopplerEngine
 from app.physics.flyover_fit import fit_flyover, flyover_frequency
-from app.physics.matching import JointMatcher, MatchOptions, TrajectoryModel
+from app.physics.matching import JointMatcher, TrajectoryModel
 
 SAMPLES = os.path.join(os.path.dirname(__file__), "..", "app", "static", "samples")
 client = TestClient(app)

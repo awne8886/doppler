@@ -10,8 +10,59 @@
  *
  * Scores are ranking statistics, not calibrated probabilities.
  */
-(function () {
+(function (root) {
+    const window = root;
     const C_DEFAULT = 343.2;
+
+    // ------------------------------------------------------------- geodesy
+    /** Local tangent-plane conversions (same equirectangular mid-latitude form as the Python engine). */
+    class GeoEngine {
+        constructor(speedOfSound = C_DEFAULT, earthRadius = 6371000.0) {
+            this.c = speedOfSound;
+            this.R = earthRadius;
+        }
+        geodeticToCartesian(lat, lon, alt, refLat, refLon, refAlt = 0.0) {
+            const toRad = Math.PI / 180.0;
+            const latRad = lat * toRad, refLatRad = refLat * toRad;
+            const latMid = (latRad + refLatRad) / 2.0;
+            return {
+                x: this.R * (lon * toRad - refLon * toRad) * Math.cos(latMid),
+                y: this.R * (latRad - refLatRad),
+                z: alt - refAlt,
+            };
+        }
+        cartesianToGeodetic(x, y, z, refLat, refLon, refAlt = 0.0) {
+            const toDeg = 180.0 / Math.PI, toRad = Math.PI / 180.0;
+            const refLatRad = refLat * toRad;
+            const latRad = refLatRad + y / this.R;
+            const latMid = (latRad + refLatRad) / 2.0;
+            const lonRad = refLon * toRad + x / (this.R * Math.cos(latMid));
+            return { lat: latRad * toDeg, lon: lonRad * toDeg, alt: z + refAlt };
+        }
+    }
+
+    /** Speed of sound in humid air, Cramer (1993); mirrors DopplerEngine.calculate_speed_of_sound. */
+    function speedOfSound(tempC = 20.0, relativeHumidity = 0.5, pressurePa = 101325.0, co2 = 0.0004) {
+        let h = relativeHumidity > 1 ? relativeHumidity / 100 : relativeHumidity;
+        h = Math.min(Math.max(h, 0), 1);
+        const t = tempC, T = t + 273.15, p = pressurePa;
+        const psv = Math.exp(1.2811805e-5 * T * T - 1.9509874e-2 * T + 34.04926034 - 6.3536311e3 / T);
+        const fEnh = 1.00062 + 3.14e-8 * p + 5.6e-7 * t * t;
+        const xw = h * fEnh * psv / p, xc = co2;
+        const a = [331.5024, 0.603055, -0.000528, 51.471935, 0.1495874, -0.000782, -1.82e-7, 3.73e-8, -2.93e-10,
+            -85.20931, -0.228525, 5.91e-5, -2.835149, -2.15e-13, 29.179762, 0.000486];
+        return a[0] + a[1] * t + a[2] * t * t
+            + (a[3] + a[4] * t + a[5] * t * t) * xw
+            + (a[6] + a[7] * t + a[8] * t * t) * p
+            + (a[9] + a[10] * t + a[11] * t * t) * xc
+            + a[12] * xw * xw + a[13] * p * p + a[14] * xc * xc + a[15] * xw * p * xc;
+    }
+
+    /** API semantics: 343.2 m/s unless weather is given; then Cramer with RH defaulting to 50 %. */
+    function speedOfSoundFor(temperatureC, humidityPct) {
+        if (temperatureC == null && humidityPct == null) return C_DEFAULT;
+        return speedOfSound(temperatureC == null ? 20 : temperatureC, (humidityPct == null ? 50 : humidityPct) / 100);
+    }
 
     // ------------------------------------------------------------ utilities
     function median(arr) {
@@ -567,7 +618,7 @@
             this.o = Object.assign({}, DEFAULT_MATCH, opts);
             this.center = { lat: centerLat, lon: centerLon };
             this.rawTrajectories = trajectories;
-            this.engine = new ClientDopplerEngine(this.o.speed_of_sound);
+            this.engine = new GeoEngine(this.o.speed_of_sound);
             this.models = trajectories.map(t => new TrajectoryModel(t, centerLat, centerLon, this.engine, this.o.altitude_bias_m, this.o.max_gap_s));
             if (!this.models.length) throw new Error('No flight trajectories supplied.');
             this.events = rawEvents.map((ev, i) => {
@@ -842,6 +893,7 @@
     };
     const REASONS = {
         no_doppler_events: 'No usable Doppler event was supplied.',
+        no_adsb_data: 'No real ADS-B trajectories were available for the search area and time window (demo data is opt-in).',
         no_matching_flights: "No candidate flight explained every event with full trajectory support.",
         insufficient_track_support: "Some measured samples fall outside the matched trajectory's arrival-time support.",
         inconsistent_event_match: 'Event residuals or outlier fraction exceed the declared thresholds.',
@@ -863,6 +915,7 @@
             reason_code: code, message: REASONS[code], policy: p, checks, calibrated: false,
         });
         if (nEvents === 0) return outcome('no_doppler_events');
+        if (result && result.status === 'no_adsb_data') return outcome('no_adsb_data');
         if (!result || result.status !== 'ok') return outcome('no_matching_flights');
         const diag = result.diagnostics || [];
         const matched = diag.filter(d => d.matched);
@@ -906,5 +959,8 @@
         return outcome('supported_by_evidence_checks');
     }
 
-    window.DopplerAnalysis = { FlyoverFit, RidgeDiscovery, JointMatcher, decideLocation, robustRmse, nelderMead };
-})();
+    window.DopplerAnalysis = {
+        FlyoverFit, RidgeDiscovery, JointMatcher, TrajectoryModel, GeoEngine, decideLocation, robustRmse, nelderMead,
+        fitEventAt, speedOfSound, speedOfSoundFor, DEFAULT_MATCH, DEFAULT_POLICY, REASONS,
+    };
+})(typeof window !== 'undefined' ? window : globalThis);

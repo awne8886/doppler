@@ -183,9 +183,14 @@
                         <label for="tempInput">Air temperature (&deg;C, optional):</label>
                         <input type="number" id="tempInput" placeholder="20" step="0.5">
                     </div>
+                    <div class="input-field">
+                        <label for="humidityInput">Relative humidity (%, optional):</label>
+                        <input type="number" id="humidityInput" placeholder="50" min="0" max="100" step="1">
+                    </div>
                     <div class="input-field checkbox-field">
                         <label><input type="checkbox" id="fitF0Check" checked> Fit f&#8320; per event</label>
                         <label><input type="checkbox" id="sensitivityCheck" checked> Sensitivity analysis</label>
+                        <label title="Without this, only real ADS-B data (live, historical or uploaded tracks) is used. Demo data cannot locate a real recording."><input type="checkbox" id="demoCheck"> Allow demo / synthetic flights</label>
                     </div>
                 </div>
 
@@ -307,9 +312,9 @@
 
     <!-- Scripts (Relative paths for GitHub Pages) -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-    
-    <script src="./js/physics_engine.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" integrity="sha384-mFKkGiGvT5vo1fEyGCD3hshDdKmW3wzXW/x+fWriYJArD0R3gawT6lMvLboM22c0" crossorigin=""></script>
+
+    <script src="./js/util.js"></script>
     <script src="./js/doppler_analysis.js"></script>
     <script src="./js/adsb_manager.js"></script>
     <script src="./js/api_client.js"></script>

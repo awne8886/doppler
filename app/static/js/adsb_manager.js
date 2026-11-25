@@ -1,6 +1,11 @@
 /**
- * Client-Side ADS-B Flight Trajectory Manager.
- * Provides curated scenarios and realistic dynamic trajectory generation for GitHub Pages.
+ * Client-side flight manager (GitHub Pages mode; mirrors app/adsb/flight_manager.py).
+ *
+ * Honesty rules: curated demo scenarios are used only for an explicit
+ * scenario id or with demo=true; synthetic flights only with demo=true.
+ * Otherwise the result is `no_adsb_data` (the static build has no live or
+ * historical ADS-B access; uploaded tracks are supplied separately).
+ * Every trajectory is tagged with `data_source` and `altitude_basis`.
  */
 
 class ClientFlightManager {
@@ -172,43 +177,64 @@ class ClientFlightManager {
             aircraft_type: sc.trajectory.aircraft_type,
             sample_audio_url: sc.sample_audio_url,
             n_flights: this.getScenarioFlights(sc).length,
+            data_source: 'curated_demo',
             audio_duration_sec: sc.audio_duration_sec || 25.0,
             recording_start_epoch: sc.recording_start_epoch || this.recordingStartEpoch(sc.trajectory, sc.search_center),
         }));
     }
 
-    fetchOrGenerateFlights(centerLat, centerLon, radiusKm, scenarioId = null) {
-        if (scenarioId && this.scenarios[scenarioId]) {
-            return this.getScenarioFlights(this.scenarios[scenarioId]);
-        }
+    tag(flights, dataSource, altitudeBasis = 'geometric') {
+        return flights.map(f => Object.assign(JSON.parse(JSON.stringify(f)), { data_source: dataSource, altitude_basis: altitudeBasis }));
+    }
 
-        // Check if close to curated scenario
-        for (const sc of Object.values(this.scenarios)) {
-            const dLat = (centerLat - sc.search_center.lat) * 111.0;
-            const dLon = (centerLon - sc.search_center.lon) * 111.0 * Math.cos((centerLat * Math.PI) / 180.0);
-            if (Math.hypot(dLat, dLon) < 15.0) {
-                return this.getScenarioFlights(sc);
+    /**
+     * Resolve candidate trajectories. Returns {status, data_source, flights, notes, limitations}.
+     */
+    findFlights(centerLat, centerLon, radiusKm, scenarioId = null, { demo = false, timeWindowStart = null } = {}) {
+        if (scenarioId) {
+            const sc = this.scenarios[scenarioId];
+            if (!sc) throw new Error(`Unknown scenario_id '${scenarioId}'.`);
+            return { status: 'ok', data_source: 'curated_demo', flights: this.tag(this.getScenarioFlights(sc), 'curated_demo'),
+                notes: ['Curated demo scenario selected explicitly (simulated trajectories).'], limitations: [] };
+        }
+        const notes = ['Static (GitHub Pages) mode has no live or historical ADS-B access.'];
+        if (demo) {
+            for (const sc of Object.values(this.scenarios)) {
+                const dLat = (centerLat - sc.search_center.lat) * 111.0;
+                const dLon = (centerLon - sc.search_center.lon) * 111.0 * Math.cos((centerLat * Math.PI) / 180.0);
+                if (Math.hypot(dLat, dLon) < 15.0) {
+                    return { status: 'ok', data_source: 'curated_demo', flights: this.tag(this.getScenarioFlights(sc), 'curated_demo'),
+                        notes: notes.concat([`Demo mode: nearby curated scenario '${sc.id}' used (simulated trajectories).`]), limitations: [] };
+                }
             }
+            return { status: 'ok', data_source: 'synthetic', flights: this.syntheticFlights(centerLat, centerLon, radiusKm, timeWindowStart),
+                notes: notes.concat(['Demo mode: synthetic flights generated around the search centre. They are not real aircraft and cannot locate a real recording.']),
+                limitations: [] };
         }
+        const message = 'No real ADS-B trajectories are available for this area and time window. Upload tracks for the recording time, or explicitly opt in to demo data.';
+        return { status: 'no_adsb_data', data_source: null, flights: [], notes: notes.concat([message]), limitations: [], message };
+    }
 
-        // Dynamically synthesize candidate flight passing near center
-        const hdg = 290.0;
-        const rad = (hdg * Math.PI) / 180.0;
-        const startDist = radiusKm * 750.0;
-        const dx = -startDist * Math.sin(rad);
-        const dy = -startDist * Math.cos(rad);
+    /** Backward-compatible list-only wrapper (same opt-in rules). */
+    fetchOrGenerateFlights(centerLat, centerLon, radiusKm, scenarioId = null, opts = {}) {
+        return this.findFlights(centerLat, centerLon, radiusKm, scenarioId, opts).flights;
+    }
 
-        const sLat = centerLat + (dy / 6371000.0) * (180.0 / Math.PI);
-        const sLon = centerLon + (dx / (6371000.0 * Math.cos((centerLat * Math.PI) / 180.0))) * (180.0 / Math.PI);
-
-        const traj = this.generateTrajectory(
-            'ADS01', 'SKY772', 'Commercial Jet (ADS-B Sim)',
-            sLat, sLon, 1600.0,
-            hdg, 175.0, -3.0, 60.0, 1700000000.0, 800.0,
-            { lat: centerLat, lon: centerLon }
-        );
-
-        return [traj];
+    /** Demo-only synthetic flights (mirrors FlightManager._synthetic_flights). */
+    syntheticFlights(centerLat, centerLon, radiusKm, t0 = null) {
+        const headings = [285.0, 45.0, 135.0], speeds = [175.0, 150.0, 190.0], alts = [1200.0, 1800.0, 2400.0];
+        const callsigns = ['SYN305', 'SYN712', 'SYN449'], types = ['Synthetic jet A', 'Synthetic jet B', 'Synthetic jet C'];
+        return headings.map((hdg, i) => {
+            const rad = (hdg * Math.PI) / 180.0;
+            const startDist = radiusKm * 750.0;
+            const dx = -startDist * Math.sin(rad), dy = -startDist * Math.cos(rad);
+            const sLat = centerLat + (dy / 6371000.0) * (180.0 / Math.PI);
+            const sLon = centerLon + (dx / (6371000.0 * Math.cos((centerLat * Math.PI) / 180.0))) * (180.0 / Math.PI);
+            const traj = this.generateTrajectory(`SYN${String(i + 1).padStart(2, '0')}`, callsigns[i], types[i], sLat, sLon, alts[i],
+                hdg, speeds[i], -2.0, 60.0, t0 != null ? t0 : 1700000000.0, 800.0 + i * 50.0, null);
+            delete traj.ground_truth_mic;
+            return Object.assign(traj, { data_source: 'synthetic', altitude_basis: 'geometric' });
+        });
     }
 }
 

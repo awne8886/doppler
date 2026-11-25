@@ -119,7 +119,7 @@ class DopplerTracer {
         return this.events
             .filter(e => e.include && e.points.length >= 3)
             .map(e => ({
-                id: e.id,
+                id: String(e.id),
                 group_id: e.group_id || e.id,
                 traced_curve: e.points.map(p => ({
                     time: Math.round(p.time * 1000) / 1000,
@@ -136,9 +136,10 @@ class DopplerTracer {
             chip.className = 'event-chip' + (i === this.active ? ' active' : '') + (e.include ? '' : ' excluded');
             chip.style.setProperty('--chip-color', e.color);
             const fit = e.meta && e.meta.flyover_fit;
-            const parts = [`<strong>${e.id}</strong>`];
-            if (e.group_id) parts.push(`${e.group_id}${e.meta && e.meta.harmonic_ratio ? ' &times;' + e.meta.harmonic_ratio : ''}`);
-            if (fit) parts.push(`f&#8320; ${Math.round(fit.f0_hz)} Hz`, `${Math.round(fit.speed_mps)} m/s`, `CPA ${(fit.cpa_slant_m / 1000).toFixed(2)} km`);
+            const { escapeHtml: esc, fmtNum: num } = window.DopplerUtil;
+            const parts = [`<strong>${esc(e.id)}</strong>`];
+            if (e.group_id) parts.push(`${esc(e.group_id)}${e.meta && e.meta.harmonic_ratio ? ' &times;' + esc(e.meta.harmonic_ratio) : ''}`);
+            if (fit) parts.push(`f&#8320; ${num(fit.f0_hz)} Hz`, `${num(fit.speed_mps)} m/s`, `CPA ${num(fit.cpa_slant_m / 1000, 2)} km`);
             else parts.push(`${e.points.length} pts`);
             if (e.meta && !e.meta.doppler_like) parts.push('<em>not Doppler-like</em>');
             chip.innerHTML = `
@@ -489,24 +490,6 @@ class DopplerTracer {
         }));
     }
 
-    loadSynthesizedPoints(pointsArray, f0) {
-        this.clearAll();
-        this.points = [];
-        for (const pt of pointsArray) {
-            const pos = this.timeFreqToCanvas(pt.time, pt.freq);
-            this.points.push({
-                time: pt.time,
-                freq: pt.freq,
-                x: pos.x,
-                y: pos.y,
-            });
-        }
-        if (f0) {
-            this.f0Input.value = Number(f0).toFixed(1);
-        }
-        this.renderTrace();
-        this.updateStats();
-    }
 }
 
 window.tracer = new DopplerTracer();

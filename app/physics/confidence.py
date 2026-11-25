@@ -42,6 +42,7 @@ class DecisionPolicy:
 
 REASONS = {
     "no_doppler_events": "No usable Doppler event was supplied.",
+    "no_adsb_data": "No real ADS-B trajectories were available for the search area and time window (demo data is opt-in).",
     "no_matching_flights": "No candidate flight explained every event with full trajectory support.",
     "insufficient_track_support": "Some measured samples fall outside the matched trajectory's arrival-time support.",
     "inconsistent_event_match": "Event residuals or outlier fraction exceed the declared thresholds.",
@@ -72,6 +73,8 @@ def decide_location(result: Dict[str, Any], policy: Optional[DecisionPolicy] = N
 
     if n_events is not None and n_events == 0:
         return outcome("no_doppler_events")
+    if result.get("status") == "no_adsb_data":
+        return outcome("no_adsb_data")
     if result.get("status") != "ok":
         return outcome("no_matching_flights")
 
