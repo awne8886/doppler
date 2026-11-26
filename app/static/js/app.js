@@ -62,6 +62,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 2. Scenario loader function
     async function loadScenario(scenarioId) {
+        if (window.liveListener && window.liveListener.active) window.liveListener.stop('Live listening stopped: a demo scenario was loaded.');
         currentScenarioId = scenarioId;
         const scenario = availableScenarios.find(s => s.id === scenarioId);
 
@@ -225,6 +226,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     async function handleFileUpload(file) {
+        if (window.liveListener && window.liveListener.active) window.liveListener.stop('Live listening stopped: an audio file was loaded.');
         showLoading(`Decoding audio file ${file.name}...`);
         try {
             await window.audioAnalyzer.loadAudioFromFile(file);
@@ -385,6 +387,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    /** Matching options and atmosphere inputs shared by manual and live geolocation. */
+    function basePayload() {
+        const payload = {
+            fit_f0: document.getElementById('fitF0Check').checked,
+            grid_resolution: parseInt(document.getElementById('gridResInput').value, 10),
+            sensitivity: document.getElementById('sensitivityCheck').checked,
+        };
+        const tempVal = document.getElementById('tempInput').value;
+        const humidityVal = document.getElementById('humidityInput').value;
+        if (tempVal !== '') payload.temperature_c = parseFloat(tempVal);
+        if (humidityVal !== '') payload.relative_humidity_pct = parseFloat(humidityVal);
+        const windSpeed = document.getElementById('windSpeedInput').value;
+        const windFrom = document.getElementById('windFromInput').value;
+        const qnh = document.getElementById('qnhInput').value;
+        if (windSpeed !== '' && parseFloat(windSpeed) > 0) {
+            payload.wind_speed_mps = parseFloat(windSpeed);
+            payload.wind_from_deg = windFrom !== '' ? parseFloat(windFrom) : 0;
+        }
+        if (qnh !== '') payload.qnh_hpa = parseFloat(qnh);
+        return payload;
+    }
+
     // 8. Main Geolocate Button
     geolocateBtn.addEventListener('click', async () => {
         const events = window.tracer.getEvents();
@@ -400,9 +424,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         let clock = null;
         try { clock = parseClock(clockInput.value); } catch (e) { toast(e.message, 'warn'); return; }
-        const tempVal = document.getElementById('tempInput').value;
-        const humidityVal = document.getElementById('humidityInput').value;
-
         const lat = parseFloat(document.getElementById('centerLat').value);
         const lon = parseFloat(document.getElementById('centerLon').value);
         const radius = parseFloat(searchRadius.value);
@@ -410,18 +431,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         showLoading(`Jointly matching ${events.length} event(s) across ${gridRes * gridRes} candidate positions (shared clock)...`);
         try {
-            const payload = {
+            const payload = Object.assign(basePayload(), {
                 center_lat: lat,
                 center_lon: lon,
                 radius_km: radius,
                 events: events.map(e => fitF0 ? e : Object.assign({}, e, { f0 })),
                 f0: fitF0 ? undefined : f0,
-                fit_f0: fitF0,
                 scenario_id: currentScenarioId,
                 demo: document.getElementById('demoCheck').checked,
-                grid_resolution: gridRes,
-                sensitivity: document.getElementById('sensitivityCheck').checked,
-            };
+            });
             if (importedTracks.length) {
                 payload.trajectories = importedTracks;
                 payload.scenario_id = null;
@@ -432,16 +450,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 payload.recording_start_epoch = clock;
                 payload.clock_tolerance_s = parseFloat(document.getElementById('clockTolInput').value) || 0;
             }
-            if (tempVal !== '') payload.temperature_c = parseFloat(tempVal);
-            if (humidityVal !== '') payload.relative_humidity_pct = parseFloat(humidityVal);
-            const windSpeed = document.getElementById('windSpeedInput').value;
-            const windFrom = document.getElementById('windFromInput').value;
-            const qnh = document.getElementById('qnhInput').value;
-            if (windSpeed !== '' && parseFloat(windSpeed) > 0) {
-                payload.wind_speed_mps = parseFloat(windSpeed);
-                payload.wind_from_deg = windFrom !== '' ? parseFloat(windFrom) : 0;
-            }
-            if (qnh !== '') payload.qnh_hpa = parseFloat(qnh);
 
             const result = await window.apiClient.geolocateObserver(payload, (stage, frac) => {
                 loadingMessage.textContent = `Matching (${stage}): ${Math.round(frac * 100)}%`;
@@ -524,7 +532,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         else downloadFile(`doppler-result-${stamp}.json`, RT.toExportJSON(lastResult, { settings: collectSettings() }));
     }
 
-    function displayGeolocationResults(result) {
+    function displayGeolocationResults(result, { quiet = false } = {}) {
         lastResult = result;
         if (result.status !== 'success') {
             displayDecision(result.decision);
@@ -532,7 +540,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('eventResults').innerHTML = `<p class="small-text">${escapeHtml(result.message || 'No match.')}</p>`
                 + (discarded ? `<p class="small-text">Discarded by the pre-filter: ${discarded}</p>` : '');
             window.mapView.clearAmbiguity();
-            if (result.status === 'no_adsb_data') toast('No real ADS-B data for this area/time. Import tracks for the recording, or tick "Allow demo / synthetic flights".', 'warn', 12000);
+            if (result.status === 'no_adsb_data' && !quiet) toast('No real ADS-B data for this area/time. Import tracks for the recording, or tick "Allow demo / synthetic flights".', 'warn', 12000);
             return;
         }
         const best = result.best_location;
@@ -577,7 +585,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             ${supported ? 'SUPPORTED' : 'INCONCLUSIVE'}: ${fmtNum(best.lat, 4)}, ${fmtNum(best.lon, 4)} ${badge(result.data_source)}
         `;
 
-        if (window.innerWidth < 1200) {
+        if (!quiet && window.innerWidth < 1200) {
             document.getElementById('resultsCard').scrollIntoView({ behavior: 'smooth' });
         }
     }
@@ -593,6 +601,35 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
         }
     });
+
+    // 10. Hooks for live microphone listening (live_listener.js)
+    window.DopplerApp = {
+        basePayload,
+        displayGeolocationResults,
+        resetResults,
+        getImportedTracks: () => importedTracks,
+        getSearchArea: () => ({
+            lat: parseFloat(document.getElementById('centerLat').value),
+            lon: parseFloat(document.getElementById('centerLon').value),
+            radius_km: parseFloat(searchRadius.value),
+        }),
+        setSearchCenter(lat, lon) {
+            document.getElementById('centerLat').value = lat.toFixed(5);
+            document.getElementById('centerLon').value = lon.toFixed(5);
+            window.mapView.updateSearchRadiusCircle(lat, lon, parseFloat(searchRadius.value));
+        },
+        clockToleranceS: () => {
+            const v = parseFloat(document.getElementById('clockTolInput').value);
+            return Number.isFinite(v) && v >= 0 ? v : 2;
+        },
+        enterLiveMode() {
+            currentScenarioId = null;
+            currentSavedAs = null;
+            clockInput.value = '';
+            clockNote.textContent = 'Live mode time-stamps the microphone audio itself.';
+        },
+    };
+    if (window.liveListener) window.liveListener.init();
 
     // Initial default scenario load: SFO
     await loadScenario('sfo_dual');

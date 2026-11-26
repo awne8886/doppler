@@ -76,6 +76,7 @@ class MapView {
         this.flightLayer = L.layerGroup().addTo(this.map);
         this.altLayer = L.layerGroup().addTo(this.map);
         this.ambiguityLayer = L.layerGroup().addTo(this.map);
+        this.liveLayer = L.layerGroup().addTo(this.map);
 
         // Map click updates search center if user clicks holding Alt or Shift
         this.map.on('click', (e) => {
@@ -256,6 +257,37 @@ class MapView {
                     .addTo(this.ambiguityLayer);
             }
         }
+    }
+
+    /**
+     * Live listening: trail of successive estimates (oldest faint, newest bright),
+     * each with its sensitivity circle when the result was supported.
+     */
+    displayLiveHistory(history) {
+        this.liveLayer.clearLayers();
+        const pts = (history || []).filter(h => Number.isFinite(h.lat) && Number.isFinite(h.lon));
+        if (!pts.length) return;
+        if (pts.length > 1) {
+            L.polyline(pts.map(h => [h.lat, h.lon]), { color: '#e879f9', weight: 1.5, opacity: 0.7, dashArray: '2,5' })
+                .addTo(this.liveLayer);
+        }
+        pts.forEach((h, i) => {
+            const newest = i === pts.length - 1;
+            const color = h.supported ? '#10b981' : '#f59e0b';
+            if (newest && h.supported && Number.isFinite(h.uncertainty_m)) {
+                L.circle([h.lat, h.lon], { radius: h.uncertainty_m, color, weight: 1, fillOpacity: 0.06 }).addTo(this.liveLayer);
+            }
+            L.circleMarker([h.lat, h.lon], {
+                radius: newest ? 7 : 4, color, weight: newest ? 2 : 1,
+                fillOpacity: newest ? 0.6 : 0.15 + 0.5 * (i / pts.length),
+            }).bindTooltip(`Live estimate #${i + 1}: ${h.n_flyovers} flyover(s), ${h.supported ? 'supported' : 'inconclusive'}`
+                + (Number.isFinite(h.uncertainty_m) ? `, \u00b1${Math.round(h.uncertainty_m)} m (uncalibrated)` : ''))
+                .addTo(this.liveLayer);
+        });
+    }
+
+    clearLiveHistory() {
+        if (this.liveLayer) this.liveLayer.clearLayers();
     }
 
     clearAmbiguity() {
