@@ -52,6 +52,28 @@
                 <span class="step-indicator">STEP 1 &bull; SPECTROGRAM</span>
             </div>
 
+            <!-- Live microphone listening -->
+            <div class="live-card" id="liveCard">
+                <div class="live-head">
+                    <button id="liveToggleBtn" class="btn btn-live" title="Ask for microphone access and listen continuously for aircraft flyovers">&#127908; Start live listening</button>
+                    <button id="liveUseMapBtn" class="btn btn-sm" title="Use the current map centre as the rough area to search (set the radius below)">Use map centre</button>
+                    <button id="liveExportBtn" class="btn btn-sm" title="Download detected flyovers, collected ADS-B tracks and estimates as JSON">Export live data</button>
+                    <label class="live-check"><input type="checkbox" id="liveSpectroCheck" checked> Show live spectrogram</label>
+                </div>
+                <div class="live-stats">
+                    <div class="live-stat"><span class="stat-label">Listening</span><span id="liveElapsed" class="stat-val">off</span></div>
+                    <div class="live-stat live-level"><span class="stat-label">Mic level</span><span class="level-track"><span id="liveLevelBar" class="level-bar"></span></span></div>
+                    <div class="live-stat"><span class="stat-label">Flyovers</span><span id="liveFlyovers" class="stat-val">0</span></div>
+                    <div class="live-stat"><span class="stat-label">ADS-B aircraft</span><span id="liveAircraft" class="stat-val">--</span></div>
+                    <div class="live-stat live-est"><span class="stat-label">Estimate</span><span id="liveEstimate" class="stat-val">--</span></div>
+                </div>
+                <div id="liveStatus" class="live-status">Listens to the microphone and locates it from passing aircraft: each flyover's Doppler
+                    pitch curve is matched against live ADS-B tracks. Set the search centre to roughly where you are (city level,
+                    <em>Use map centre</em> or shift-click the map). One flyover is ambiguous; two or more from different directions give a
+                    position, and each further flyover refines it. Keep this tab open.</div>
+                <ol id="liveHistory" class="live-history"></ol>
+            </div>
+
             <!-- Upload & File Controls -->
             <div class="audio-control-card">
                 <div class="drop-zone" id="dropZone">
@@ -368,12 +390,14 @@
     <script src="./js/util.js"></script>
     <script src="./js/track_import.js"></script>
     <script src="./js/results.js"></script>
+    <script src="./js/live_core.js"></script>
     <script src="./js/doppler_analysis.js"></script>
     <script src="./js/adsb_manager.js"></script>
     <script src="./js/api_client.js"></script>
     <script src="./js/audio_analyzer.js"></script>
     <script src="./js/tracer.js"></script>
     <script src="./js/map_view.js"></script>
+    <script src="./js/live_listener.js"></script>
     <script src="./js/app.js"></script>
 </body>
 </html>

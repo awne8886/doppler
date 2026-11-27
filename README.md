@@ -218,6 +218,32 @@ false-support count of the fixed 6-run subset rises above `benchmarks/ci_baselin
 
 ---
 
+## 🎙️ Live microphone mode
+
+**Start live listening** asks for microphone access and then listens continuously. A microphone cannot be located from sound
+alone. Live mode does what the rest of the app does with a recording, but continuously and with two advantages: the clock is known
+(audio blocks are time-stamped as they arrive), and live ADS-B is collected for the whole session.
+
+1. Audio is low-passed, resampled to 8 kHz and kept for the last 5 minutes. Each block is time-stamped from the AudioContext clock
+   (`getOutputTimestamp`). A new anchor starts when audio was dropped, and slow audio-vs-system clock drift is followed.
+2. Every ~15 s the latest 4 minutes are scanned for Doppler ridges in a Web Worker. A harmonic group is committed as a **flyover**
+   once it has fully passed (ended ≥ 8 s before the window end, not clipped at its start), with UTC times. Later windows that see
+   the same flyover again (time overlap and matching frequency) replace it only with a longer detection and never add a duplicate.
+3. In server mode the live snapshot is polled every ~10 s around the search centre. The browser keeps each aircraft's *reported*
+   state (not the ±30 s projection) and builds real multi-point tracks. They are sent as `trajectories`
+   (`source_format: "live_poll"`), so the server validates and conditions them like uploaded tracks and reports them as `uploaded`.
+4. After every new flyover, the most recent 8 flyovers are matched jointly on the shared clock (`recording_start_epoch` = the
+   first flyover's start, `clock_tolerance_s` from the form). After a **supported** result, the search re-centres on the estimate
+   and shrinks to 4× the sensitivity radius (min 2 km) for a finer grid, and runs once more. An inconclusive result widens the
+   search back towards the original area, so a wrong lock-in can recover. Each estimate is listed and drawn as a trail on the map.
+
+You still give a rough starting area (city level: *Use map centre*, shift-click the map, or the fields), because ADS-B has to be
+fetched for *some* area. One flyover is ambiguous (mirror symmetry). Two or more from different directions are needed, and each
+further flyover refines the estimate. Analysis and polling are driven by incoming audio blocks rather than timers, so they keep
+running in a background tab, but the tab must stay open. **Export live data** saves the flyovers, collected tracks and estimates
+as JSON. Microphone access needs HTTPS or `http://localhost`. The static GitHub Pages build has no live ADS-B: it still detects
+and time-stamps flyovers, and can locate them against imported tracks.
+
 ## 🖥️ System Features
 
 - **Audio**: drag-and-drop WAV/MP3/FLAC/OGG/M4A (non-WAV server-side decoding needs ffmpeg), STFT spectrogram, palettes, playback.

@@ -66,7 +66,8 @@
 
     // ------------------------------------------------------------ utilities
     function median(arr) {
-        const a = Array.from(arr).sort((x, y) => x - y);
+        // Typed-array sort is numeric and several times faster than a comparator sort (same result for finite values).
+        const a = Float64Array.from(arr).sort();
         const n = a.length;
         if (n === 0) return NaN;
         return n % 2 ? a[(n - 1) >> 1] : 0.5 * (a[n / 2 - 1] + a[n / 2]);
